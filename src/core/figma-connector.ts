@@ -25,7 +25,7 @@ export interface IFigmaConnector {
     options?: any
   ): Promise<any>;
   deleteVariable(variableId: string): Promise<any>;
-  refreshVariables(): Promise<any>;
+  refreshVariables(fileKey?: string): Promise<any>;
   renameVariable(variableId: string, newName: string): Promise<any>;
   setVariableDescription(variableId: string, description: string): Promise<any>;
 

@@ -67,6 +67,25 @@ import {
 const logger = createChildLogger({ component: "tokens-tools" });
 
 /**
+ * Read the file's variables as they are now. getVariablesFromPluginUI returns
+ * the snapshot the plugin UI took when the plugin opened, so a variable added
+ * or edited since was missing from exports, and import diffed against stale
+ * state. REFRESH_VARIABLES re-reads them and replaces that snapshot (the
+ * plugin posts the new data before it answers), so refresh, then read. A
+ * failed refresh falls back to the snapshot rather than failing the call.
+ */
+export async function readCurrentVariables(connector: any, fileKey?: string): Promise<any> {
+  if (typeof connector.refreshVariables === "function") {
+    try {
+      await connector.refreshVariables(fileKey);
+    } catch (err) {
+      logger.warn({ err }, "Variable refresh failed; reading the plugin's last snapshot");
+    }
+  }
+  return connector.getVariablesFromPluginUI(fileKey);
+}
+
+/**
  * MCP version stamp embedded in DTCG `$extensions["figma-console-mcp"].mcpVersion`
  * on every exported token document. Kept in sync with package.json by
  * scripts/release.sh — see step 3 of the release flow.
@@ -244,9 +263,8 @@ async function handleExport(
     ? null
     : loadTokensConfig({ explicitPath: args.configPath });
 
-  // 2. Fetch variables from Figma via the desktop connector. The connector's
-  //    getVariablesFromPluginUI returns the plugin's cached variable data
-  //    (instant, all plans, full Plugin API fidelity).
+  // 2. Fetch variables from Figma via the desktop connector (all plans, full
+  //    Plugin API fidelity), refreshed first — see readCurrentVariables.
   const connector = await getDesktopConnector();
   // We don't have a specific fileKey here unless the caller passed one in
   // config; pass undefined to let the connector use the currently-connected
@@ -255,7 +273,7 @@ async function handleExport(
     ? extractFileKey(loaded.config.figmaFile)
     : undefined;
 
-  const raw = await connector.getVariablesFromPluginUI(fileKey);
+  const raw = await readCurrentVariables(connector, fileKey);
 
   // Unwrap the plugin's response — same logic as the existing figma_get_variables.
   const variableData = raw?.result?.variables ? raw.result : raw;
@@ -629,7 +647,7 @@ async function handleImport(
   const fileKey = loaded?.config?.figmaFile
     ? extractFileKey(loaded.config.figmaFile)
     : undefined;
-  const raw = await connector.getVariablesFromPluginUI(fileKey);
+  const raw = await readCurrentVariables(connector, fileKey);
   const variableData = raw?.result?.variables ? raw.result : raw;
   const figmaPayload = normalizeFigmaPayload(variableData ?? { variables: [], variableCollections: [] });
   const { document: figmaDoc } = convertFigmaVariablesToDocument(figmaPayload, {

@@ -153,8 +153,8 @@ export class WebSocketConnector implements IFigmaConnector {
     return this.wsServer.sendCommand('DELETE_VARIABLE', { variableId });
   }
 
-  async refreshVariables(): Promise<any> {
-    return this.wsServer.sendCommand('REFRESH_VARIABLES', {}, 300000);
+  async refreshVariables(fileKey?: string): Promise<any> {
+    return this.wsServer.sendCommand('REFRESH_VARIABLES', {}, 300000, fileKey);
   }
 
   async renameVariable(variableId: string, newName: string): Promise<any> {

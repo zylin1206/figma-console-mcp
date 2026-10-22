@@ -118,7 +118,7 @@ export class CloudWebSocketConnector implements IFigmaConnector {
 		return this.sendCommand('DELETE_VARIABLE', { variableId });
 	}
 
-	async refreshVariables(): Promise<any> {
+	async refreshVariables(_fileKey?: string): Promise<any> {
 		return this.sendCommand('REFRESH_VARIABLES', {}, 300000);
 	}
 
