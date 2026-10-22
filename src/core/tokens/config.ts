@@ -105,12 +105,15 @@ export const TokensConfigSchema = z
         formats: z.array(OutputTargetSchema).default([]),
       })
       .optional(),
-    /** Mode name mappings (Figma mode name → output mode name). */
+    /**
+     * Mode name mappings (Figma mode name → output mode name). Export renames
+     * modes with `map`; import reverses it unless the call passes modeMapping.
+     */
     modes: z
       .object({
         /** e.g. { "Light": "light", "Dark": "dark" } */
         map: z.record(z.string()).optional(),
-        /** Default mode if a token has no explicit mode (e.g. "Light"). */
+        /** Figma mode for imported tokens with no explicit mode (e.g. "Light"). */
         default: z.string().optional(),
       })
       .optional(),

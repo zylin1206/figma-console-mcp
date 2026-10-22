@@ -24,6 +24,7 @@ import {
   makeAliasIdResolver,
   registerImportTokensTool,
   tokenValueToFigma,
+  applyModeMapping,
 } from "../src/core/tokens-tools.js";
 
 // ============================================================================
@@ -933,5 +934,94 @@ describe("duration unit agreement (diff canonicalization vs write path)", () => 
     const nextDiff = computeDiffPlan(figmaSideWith(500), codeSideWith(0.5));
     expect(nextDiff.toUpdate).toEqual([]);
     expect(nextDiff.unchanged).toBe(1);
+  });
+});
+
+// ============================================================================
+// modeMapping (input mode name → Figma mode name)
+// ============================================================================
+
+describe("figma_import_tokens — modeMapping", () => {
+  /** The Theme collection, its one mode named "Light" instead of "Default". */
+  function lightState() {
+    const s = figmaState();
+    s.variableCollections[0].modes = [{ modeId: "m1", name: "Light" }];
+    return s;
+  }
+  // A hand-written single-mode DTCG file parses into mode "Default".
+  const payload = JSON.stringify({ Theme: { color: { primary: { $type: "color", $value: "#0000FF" } } } });
+
+  it("without it, a 'Default' value finds no Figma mode and nothing is written", async () => {
+    const connector = makeMockConnector(lightState());
+    const res = await runImport(captureImportHandler(connector), { payload, dryRun: false, strategy: "merge" });
+    expect(connector.calls.some((c) => c.type === "update")).toBe(false);
+    expect(res.warnings.join("\n")).toMatch(/modeId not found/);
+  });
+
+  it("maps the input mode onto the Figma mode and writes the value", async () => {
+    const connector = makeMockConnector(lightState());
+    const res = await runImport(captureImportHandler(connector), {
+      payload,
+      dryRun: false,
+      strategy: "merge",
+      modeMapping: { Default: "Light" },
+    });
+    const updates = connector.calls.find((c) => c.type === "update")!.detail;
+    const primary = updates.find((u: any) => u.variableId === "VariableID:1:10");
+    expect(primary.valuesByMode.m1).toMatchObject({ r: 0, g: 0, b: 1 });
+    expect(res.applyResult.applied).toBe(1);
+    expect(res.warnings.join("\n")).not.toMatch(/modeId not found/);
+  });
+});
+
+describe("applyModeMapping", () => {
+  const doc = (): TokenDocument => ({
+    sets: [
+      {
+        name: "Theme",
+        modes: ["light", "dark"],
+        tokens: [
+          {
+            path: ["ease"],
+            type: "cubicBezier",
+            values: { light: { literal: [0, 0, 0.58, 1] }, dark: { literal: [0, 0, 0.58, 1] } },
+            extensions: {
+              "figma-console-mcp": {
+                primaryMode: "light",
+                lastSyncedValue: { light: { literal: [0, 0, 0.58, 1] } },
+                easing: { light: { type: "EASE_OUT" }, dark: { type: "EASE_OUT" } },
+              },
+            },
+          },
+        ],
+      },
+    ],
+  } as any);
+
+  it("renames the set's modes, values and per-mode extensions; leaves unmapped modes", () => {
+    const warnings: string[] = [];
+    const d = applyModeMapping(doc(), { light: "Light" }, warnings);
+    const set = d.sets[0];
+    const ext = set.tokens[0].extensions!["figma-console-mcp"] as any;
+    expect(set.modes).toEqual(["Light", "dark"]);
+    expect(Object.keys(set.tokens[0].values)).toEqual(["Light", "dark"]);
+    expect(ext.primaryMode).toBe("Light");
+    expect(Object.keys(ext.lastSyncedValue)).toEqual(["Light"]);
+    expect(Object.keys(ext.easing)).toEqual(["Light", "dark"]);
+    expect(warnings).toEqual([]);
+  });
+
+  it("keeps the first of two modes mapped onto one Figma mode, with a warning", () => {
+    const warnings: string[] = [];
+    const d = applyModeMapping(doc(), { light: "Default", dark: "Default" }, warnings);
+    expect(d.sets[0].modes).toEqual(["Default"]);
+    expect(Object.keys(d.sets[0].tokens[0].values)).toEqual(["Default"]);
+    expect(warnings.join("\n")).toMatch(/same Figma mode "Default".*dropped "dark"/);
+  });
+
+  it("is a no-op without a mapping", () => {
+    const d = doc();
+    expect(applyModeMapping(d, undefined, [])).toBe(d);
+    expect(d.sets[0].modes).toEqual(["light", "dark"]);
   });
 });

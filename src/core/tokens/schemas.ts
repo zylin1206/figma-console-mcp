@@ -180,13 +180,13 @@ export const ImportTokensInputSchema = z
       .record(z.string())
       .optional()
       .describe(
-        "Map input token set names to Figma collection names. Example: {'primitives': 'Primitive Tokens'}. When omitted, set names map 1:1 to collection names.",
+        "Map input token set names to Figma collection names. Example: {'primitives': 'Primitive Tokens'}. A key may be the set name or its slug; set-qualified references ({primitives.color.blue}) follow the rename. When omitted, set names map 1:1 to collection names.",
       ),
     modeMapping: z
       .record(z.string())
       .optional()
       .describe(
-        "Map input mode names to Figma mode names. Useful when source uses 'light'/'dark' and Figma uses 'Light'/'Dark'. Defaults to 1:1 mapping with case preservation.",
+        "Map input mode names to Figma mode names. Useful when source uses 'light'/'dark' and Figma uses 'Light'/'Dark', or a single-mode file (read as mode 'Default') targets a collection whose mode is named otherwise: {'Default': 'Mode 1'}. When omitted, tokens.config.json's modes.map applies in reverse; otherwise names map 1:1.",
       ),
     prefix: z
       .string()

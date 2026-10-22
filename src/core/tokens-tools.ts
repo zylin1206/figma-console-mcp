@@ -61,6 +61,7 @@ import {
   loadTokensConfig,
   parse as parseTokenPayload,
   resolveOutputTargets,
+  slugifySetName,
   stripRawColorFromValues,
   type TokenDocument,
 } from "./tokens/index.js";
@@ -353,6 +354,9 @@ async function handleExport(
     stripPrefix: args.prefix,
     mcpVersion: MCP_VERSION,
   });
+  // tokens.config.json modes.map renames Figma modes in the output
+  // ({ "Light": "light" }); import applies it in reverse.
+  applyModeMapping(document, loaded?.config?.modes?.map, warnings);
 
   // 5. Resolve which output formats to emit.
   const targets = resolveOutputTargets(loaded?.config ?? null, args.format);
@@ -641,7 +645,14 @@ async function handleImport(
 
   // 4. Merge documents into a single TokenDocument (sets are concatenated;
   //    tokens within sets are combined by path).
-  const merged = mergeDocuments(documents);
+  //    Then line its sets and modes up with Figma's names. Without an
+  //    explicit modeMapping, tokens.config.json's modes (map reversed, and
+  //    default) apply, so one config serves both directions.
+  const merged = applyModeMapping(
+    applyCollectionMapping(mergeDocuments(documents), args.collectionMapping, parseWarnings),
+    args.modeMapping ?? configImportModeMapping(loaded?.config?.modes),
+    parseWarnings,
+  );
 
   // 5. Fetch current Figma state for diffing.
   const connector = await getDesktopConnector();
@@ -1396,6 +1407,129 @@ function collectInputFiles(
       const full = join(sourceDir, name);
       return { path: full, content: readFileSync(full, "utf-8") };
     });
+}
+
+/**
+ * Rename modes in an imported document (figma_import_tokens `modeMapping`:
+ * input mode name → Figma mode name), so a file whose modes are "light" /
+ * "dark", or a single-mode file parsed as "Default", lines up with the
+ * collection's real modes. Every mode-keyed field moves with it: the set's
+ * mode list, token values, and the per-mode extensions. Unmapped modes keep
+ * their names. When two input modes map to one Figma mode, the first wins.
+ * Mutates and returns `doc`.
+ */
+export function applyModeMapping(
+  doc: TokenDocument,
+  mapping: Record<string, string> | undefined,
+  warnings: string[],
+): TokenDocument {
+  if (!mapping || Object.keys(mapping).length === 0) return doc;
+  const to = (mode: string) => mapping[mode] ?? mode;
+  const collided = new Set<string>();
+  const remapKeys = <V>(record: Record<string, V> | undefined, where: string): Record<string, V> | undefined => {
+    if (!record) return record;
+    const out: Record<string, V> = {};
+    for (const [mode, value] of Object.entries(record)) {
+      const target = to(mode);
+      if (target in out) {
+        const note = `${where}: modes map to the same Figma mode "${target}"`;
+        if (!collided.has(note)) warnings.push(`modeMapping — ${note}; kept the first, dropped "${mode}".`);
+        collided.add(note);
+        continue;
+      }
+      out[target] = value;
+    }
+    return out;
+  };
+
+  for (const set of doc.sets) {
+    set.modes = [...new Set(set.modes.map(to))];
+    for (const token of set.tokens) {
+      token.values = remapKeys(token.values, `${set.name}::${token.path.join(".")}`)!;
+      const ext = token.extensions?.["figma-console-mcp"];
+      if (!ext) continue;
+      if (ext.primaryMode) ext.primaryMode = to(ext.primaryMode);
+      ext.lastSyncedValue = remapKeys(ext.lastSyncedValue, "lastSyncedValue");
+      ext.composedColor = remapKeys(ext.composedColor, "composedColor");
+      ext.spring = remapKeys(ext.spring, "spring");
+      ext.easing = remapKeys(ext.easing, "easing");
+    }
+  }
+  return doc;
+}
+
+/**
+ * Rename sets in an imported document (figma_import_tokens
+ * `collectionMapping`: input set name → Figma collection name). A key may be
+ * the set's name or its slug ("primitives" for "Primitives"). Set-qualified
+ * references to a renamed set ({primitives.color.blue}) are rewritten to the
+ * new slug so they still resolve. Two sets mapped onto one name would merge
+ * by accident, so the second keeps its name, with a warning. Mutates and
+ * returns `doc`.
+ */
+export function applyCollectionMapping(
+  doc: TokenDocument,
+  mapping: Record<string, string> | undefined,
+  warnings: string[],
+): TokenDocument {
+  if (!mapping || Object.keys(mapping).length === 0) return doc;
+  const slugRenames = new Map<string, string>();
+  const taken = new Set(doc.sets.map((s) => s.name));
+  for (const set of doc.sets) {
+    const target = mapping[set.name] ?? mapping[slugifySetName(set.name)];
+    if (!target || target === set.name) continue;
+    if (taken.has(target)) {
+      warnings.push(`collectionMapping — "${set.name}" → "${target}" skipped: another set already has that name.`);
+      continue;
+    }
+    taken.delete(set.name);
+    taken.add(target);
+    slugRenames.set(slugifySetName(set.name), slugifySetName(target));
+    set.name = target;
+  }
+  if (slugRenames.size === 0) return doc;
+
+  const rewrite = (ref: string): string => {
+    const bare = ref.replace(/^\{|\}$/g, "");
+    const dot = bare.indexOf(".");
+    const renamed = dot > 0 ? slugRenames.get(bare.slice(0, dot)) : undefined;
+    return renamed ? `{${renamed}${bare.slice(dot)}}` : ref;
+  };
+  const rewriteValue = (v: any) => {
+    if (!v || typeof v !== "object") return;
+    if (typeof v.reference === "string") v.reference = rewrite(v.reference);
+    for (const part of [v.composed?.color, v.composed?.opacity]) {
+      if (part && typeof part.reference === "string") part.reference = rewrite(part.reference);
+    }
+  };
+  for (const set of doc.sets) {
+    for (const token of set.tokens) {
+      Object.values(token.values).forEach(rewriteValue);
+      const ext = token.extensions?.["figma-console-mcp"];
+      if (!ext) continue;
+      Object.values(ext.lastSyncedValue ?? {}).forEach(rewriteValue);
+      for (const c of Object.values(ext.composedColor ?? {})) {
+        if (typeof c.color === "string" && c.color.startsWith("{")) c.color = rewrite(c.color);
+        if (typeof c.opacity === "string" && c.opacity.startsWith("{")) c.opacity = rewrite(c.opacity);
+      }
+    }
+  }
+  return doc;
+}
+
+/**
+ * The import mode mapping a tokens.config.json implies: `modes.map` (Figma →
+ * code) reversed, plus `modes.default` for tokens with no explicit mode
+ * (which parse as "Default").
+ */
+function configImportModeMapping(
+  modes: { map?: Record<string, string>; default?: string } | undefined,
+): Record<string, string> | undefined {
+  if (!modes?.map && !modes?.default) return undefined;
+  return {
+    ...(modes.default ? { Default: modes.default } : {}),
+    ...Object.fromEntries(Object.entries(modes.map ?? {}).map(([figma, code]) => [code, figma])),
+  };
 }
 
 /**
