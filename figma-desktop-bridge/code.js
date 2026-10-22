@@ -13,6 +13,20 @@ var PLUGIN_VERSION = '1.39.0'; // Last release in which plugin files changed.
 
 console.log('🌉 [Desktop Bridge] Plugin loaded (v' + PLUGIN_VERSION + ')');
 
+// Reading figma.currentPage.selection throws when it contains a node type the
+// Plugin API cannot represent yet (e.g. SPEC_BLOCK: "unsupported type in
+// createVMObject"). Returns the selection, or null and records the error.
+var __lastSelectionError = null;
+function readSelectionSafely() {
+  try {
+    __lastSelectionError = null;
+    return figma.currentPage.selection;
+  } catch (e) {
+    __lastSelectionError = e && e.message ? e.message : String(e);
+    return null;
+  }
+}
+
 // Show minimal UI - compact status indicator
 figma.showUI(__html__, { width: 240, height: 40, visible: true, themeColors: true });
 
@@ -3937,7 +3951,7 @@ figma.ui.onmessage = async (msg) => {
   // ============================================================================
   else if (msg.type === 'GET_FILE_INFO') {
     try {
-      var selection = figma.currentPage.selection;
+      var selection = readSelectionSafely();
       figma.ui.postMessage({
         type: 'GET_FILE_INFO_RESULT',
         requestId: msg.requestId,
@@ -7306,7 +7320,24 @@ figma.loadAllPagesAsync().then(function() {
   });
   // Selection change listener — tracks what the user has selected in Figma
   figma.on('selectionchange', function() {
-    var selection = figma.currentPage.selection;
+    var selection = readSelectionSafely();
+    if (selection === null) {
+      // The selection holds a node type the Plugin API cannot represent yet
+      // (e.g. SPEC_BLOCK): even reading .selection throws. Report it instead
+      // of letting the error reach Figma's "Plugin error" toast.
+      figma.ui.postMessage({
+        type: 'SELECTION_CHANGE',
+        data: {
+          nodes: [],
+          count: 0,
+          unreadable: true,
+          error: __lastSelectionError,
+          page: figma.currentPage.name,
+          timestamp: Date.now()
+        }
+      });
+      return;
+    }
     var selectedNodes = [];
     for (var i = 0; i < Math.min(selection.length, 50); i++) {
       try {

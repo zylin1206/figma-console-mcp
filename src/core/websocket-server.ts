@@ -162,6 +162,9 @@ export interface SelectionInfo {
   count: number;
   page: string;
   timestamp: number;
+  /** True when the selection holds a node type the Plugin API cannot read yet (e.g. SPEC_BLOCK). */
+  unreadable?: boolean;
+  error?: string;
 }
 
 export interface DocumentChangeEntry {

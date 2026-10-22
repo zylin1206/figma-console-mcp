@@ -1550,6 +1550,21 @@ If Design Systems Assistant MCP is not available, install it from: https://githu
 						};
 					}
 
+					if (selection?.unreadable) {
+						return {
+							content: [{
+								type: "text",
+								text: JSON.stringify({
+									selection: [],
+									count: null,
+									page: selection.page,
+									error: selection.error,
+									message: "The selection contains a layer type the Figma Plugin API cannot read yet (e.g. a spec block). Select a different layer, or use the REST API (figma_get_file_data) to inspect it.",
+								}),
+							}],
+						};
+					}
+
 					if (!selection || selection.count === 0) {
 						return {
 							content: [{
