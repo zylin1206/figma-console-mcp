@@ -34,6 +34,7 @@
 
 import type { Token, TokenDocument, TokenSet, TokenValue } from "../types.js";
 import { buildTokenIndex, resolveAliasChain } from "../alias-resolver.js";
+import { motionCssValue } from "./motion.js";
 import type { FormatOptions, FormatResult } from "./index.js";
 
 export function formatTailwindV3(
@@ -256,6 +257,8 @@ function formatTokenValue(
     return null;
   }
 
+  const motion = motionCssValue(effective.literal, token.type);
+  if (motion !== null) return JSON.stringify(motion);
   if (typeof effective.literal === "number") {
     if (token.type === "dimension") return JSON.stringify(`${effective.literal}px`);
     return String(effective.literal);

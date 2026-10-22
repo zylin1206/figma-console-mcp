@@ -37,6 +37,7 @@
  */
 
 import { renderComposed, composedFallbackNote, num, referenceInExport } from "./composed-color.js";
+import { motionCssValue } from "./motion.js";
 import type { Token, TokenDocument, TokenSet, TokenValue } from "../types.js";
 import { buildTokenIndex, referenceTargetPath } from "../alias-resolver.js";
 import type { FormatOptions, FormatResult } from "./index.js";
@@ -348,6 +349,8 @@ function kebab(s: string): string {
 }
 
 function formatValue(value: unknown, type: string): string {
+  const motion = motionCssValue(value, type);
+  if (motion !== null) return motion;
   if (typeof value === "number") {
     if (type === "dimension") return `${value}px`;
     return String(value);

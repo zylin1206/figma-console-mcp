@@ -28,6 +28,7 @@ import {
   loadTokensConfig,
   type TokenDocument,
 } from "../src/core/tokens/index.js";
+import { format as formatTokens } from "../src/core/tokens/formatters/index.js";
 import { formatDtcg } from "../src/core/tokens/formatters/dtcg.js";
 import { parseDtcg } from "../src/core/tokens/parsers/dtcg.js";
 import {
@@ -903,6 +904,52 @@ describe("token sync engine", () => {
         mass: 1,
         stiffness: 100,
         damping: 15,
+      });
+    });
+
+    describe("Plugin API MotionEasing values (as Figma returns them, Update 133)", () => {
+      // Values read live from Figma Desktop, float32 noise included.
+      const payload = {
+        collections: [{ id: "c1", name: "Motion", modes: [{ modeId: "m1", name: "Default" }], variableIds: ["t", "c", "p", "s"] }],
+        variables: [
+          { id: "t", name: "duration/fast", resolvedType: "TIMING" as const, variableCollectionId: "c1", valuesByMode: { m1: 0.20000000298023224 } },
+          { id: "c", name: "easing/standard", resolvedType: "EASING" as const, variableCollectionId: "c1",
+            valuesByMode: { m1: { type: "CUSTOM_CUBIC_BEZIER", easingFunctionCubicBezier: { x1: 0.4000000059604645, y1: 0, x2: 0.20000000298023224, y2: 1 } } } },
+          { id: "p", name: "easing/out", resolvedType: "EASING" as const, variableCollectionId: "c1",
+            valuesByMode: { m1: { type: "EASE_OUT", easingFunctionCubicBezier: { x1: 0, y1: 0, x2: 0.58, y2: 1 } } } },
+          { id: "s", name: "easing/bouncy", resolvedType: "EASING" as const, variableCollectionId: "c1",
+            valuesByMode: { m1: { type: "CUSTOM_SPRING", easingFunctionSpring: { bounce: 0.30000000000000004 } } } },
+        ],
+      };
+      const convert = () => convertFigmaVariablesToDocument(payload as any);
+      const tok = (name: string) => convert().document.sets[0].tokens.find((t) => t.path.join("/") === name)!;
+      const ext = (name: string) => tok(name).extensions?.["figma-console-mcp"] as any;
+
+      it("rounds off float32 noise", () => {
+        expect(tok("duration/fast").values.Default.literal).toEqual({ value: 200, unit: "ms" });
+        expect(tok("easing/standard").values.Default.literal).toEqual([0.4, 0, 0.2, 1]);
+        expect(ext("easing/standard").easing).toBeUndefined();
+      });
+
+      it("keeps a preset's name and curve, and a spring's bounce, in extensions", () => {
+        expect(tok("easing/out").values.Default.literal).toEqual([0, 0, 0.58, 1]);
+        expect(ext("easing/out").easing.Default).toEqual({ type: "EASE_OUT", easingFunctionCubicBezier: { x1: 0, y1: 0, x2: 0.58, y2: 1 } });
+        expect(tok("easing/bouncy").values.Default.literal).toEqual([0.25, 0.1, 0.25, 1]);
+        expect(ext("easing/bouncy").easing.Default).toEqual({ type: "CUSTOM_SPRING", easingFunctionSpring: { bounce: 0.3 } });
+        expect(convert().warnings.join("\n")).toMatch(/easing\/bouncy.*CUSTOM_SPRING/);
+      });
+
+      it("renders as CSS durations and cubic-bezier() in CSS-like formats", () => {
+        const doc = convert().document;
+        const out = (format: string) =>
+          (formatTokens(doc, { target: { format } } as any) as any).files.map((f: any) => f.content).join("\n");
+        const css = out("css-vars");
+        expect(css).toMatch(/--duration-fast: 200ms;/);
+        expect(css).toMatch(/--easing-standard: cubic-bezier\(0\.4, 0, 0\.2, 1\);/);
+        expect(css).not.toMatch(/\[object Object\]|"unit"/);
+        expect(out("scss")).toMatch(/\$easing-out: cubic-bezier\(0, 0, 0\.58, 1\);/);
+        expect(out("tailwind-v4")).toMatch(/200ms/);
+        expect(out("tailwind-v3")).toMatch(/"cubic-bezier\(0\.4, 0, 0\.2, 1\)"/);
       });
     });
 

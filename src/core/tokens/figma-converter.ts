@@ -19,6 +19,7 @@ import type {
   TokenType,
   TokenValue,
   ComposedColor,
+  FigmaMotionEasing,
 } from "./types.js";
 import { slugifySetName } from "./alias-resolver.js";
 import { stripRawColorFromValues } from "./dialect.js";
@@ -54,14 +55,23 @@ interface FigmaVariable {
 }
 
 /**
- * Config-2026 EASING variable value shape. `bezierValues` is present for
- * bezier-based easings; spring easings carry `springValues` instead (and no
- * usable bezier).
+ * EASING variable value. The Plugin API (Update 133) returns a MotionEasing:
+ * `type` plus `easingFunctionCubicBezier` (presets and custom curves) or
+ * `easingFunctionSpring` (springs). The Config-2026 shape — `bezierValues`
+ * or `springValues` — is still read for payloads that carry it.
  */
-interface FigmaEasingValue {
+interface FigmaEasingValue extends Partial<FigmaMotionEasing> {
   easingType?: string;
   bezierValues?: { p1x: number; p1y: number; p2x: number; p2y: number };
   springValues?: { mass?: number; stiffness?: number; damping?: number };
+}
+
+/** DTCG cubicBezier exported for an easing with no bezier (spring, HOLD). */
+export const FALLBACK_EASING_BEZIER = [0.25, 0.1, 0.25, 1];
+
+/** Round off Figma's float32 noise (0.20000000298 → 0.2). */
+function round6(n: number): number {
+  return Math.round(n * 1e6) / 1e6;
 }
 
 type FigmaValue =
@@ -268,10 +278,11 @@ function convertVariable(
   const type = isOpacity ? "number" : mapResolvedType(variable.resolvedType, variable.name, warnings);
 
   // Convert each (mode → value) pair to our TokenValue shape, filtered by
-  // the wanted modes. Spring easings can't be expressed in DTCG — their
-  // parameters get stashed per-mode in the token's extensions.
+  // the wanted modes. Easings a cubicBezier can't fully express (springs,
+  // named presets) get stashed per-mode in the token's extensions.
   const values: Record<string, TokenValue> = {};
   const springByMode: Record<string, unknown> = {};
+  const easingByMode: Record<string, FigmaMotionEasing> = {};
   for (const mode of wantedModes) {
     const rawValue = variable.valuesByMode[mode.modeId];
     if (rawValue === undefined) {
@@ -289,8 +300,9 @@ function convertVariable(
       collectionNameById,
       opts,
       warnings,
-      (spring) => {
-        springByMode[mode.name] = spring;
+      (extra) => {
+        if (extra.spring) springByMode[mode.name] = extra.spring;
+        if (extra.easing) easingByMode[mode.name] = extra.easing;
       },
     );
   }
@@ -316,16 +328,16 @@ function convertVariable(
         ...(Object.keys(composedByMode).length > 0 ? { composedColor: composedByMode } : {}),
         variableId: variable.id,
         collectionId: variable.variableCollectionId,
-        // The Figma-native type is what import needs to decide writability
-        // — TIMING/EASING variables cannot be written via the Plugin API,
-        // and FLOAT variables whose token type is "duration" (name-inferred)
-        // must NOT be mistaken for TIMING.
+        // The Figma-native type is what import writes back: FLOAT variables
+        // whose token type is "duration" (name-inferred) must NOT be
+        // mistaken for TIMING, which holds seconds, not milliseconds.
         figmaResolvedType: variable.resolvedType,
         // Preserve the original variable name when the token path dropped
         // the trailing "Timing"/"Easing" segment, so round-trip can
         // reconstruct it.
         ...(strippedTypeSuffix ? { figmaName: variable.name } : {}),
         ...(Object.keys(springByMode).length > 0 ? { spring: springByMode } : {}),
+        ...(Object.keys(easingByMode).length > 0 ? { easing: easingByMode } : {}),
         // Scopes: stash only when NON-default. ["ALL_SCOPES"] (Figma's
         // default) and empty/absent arrays are omitted so pre-existing
         // exports stay byte-identical. codeSyntax: stash only when
@@ -418,7 +430,7 @@ function convertValue(
   collectionNameById: Map<string, string>,
   opts: ConvertOptions,
   warnings: string[],
-  onSpring: (spring: Record<string, unknown>) => void,
+  onMotionExtra: (extra: { spring?: Record<string, unknown>; easing?: FigmaMotionEasing }) => void,
 ): TokenValue {
   const resolvedType = variable.resolvedType;
 
@@ -427,7 +439,7 @@ function convertValue(
   // literal so every format has a correct fallback.
   if (resolvedType === "COLOR" && isComposedColor(rawValue)) {
     const ref = (alias: VariableAlias) =>
-      convertValue(alias, variable, modeName, modeId, variableById, collectionNameById, opts, warnings, onSpring).reference;
+      convertValue(alias, variable, modeName, modeId, variableById, collectionNameById, opts, warnings, onMotionExtra).reference;
     const colorPart: ComposedColor["color"] = isVariableAlias(rawValue.color)
       ? { reference: ref(rawValue.color) ?? "{unknown}" }
       : { literal: rgbaToHex(rawValue.color as { r: number; g: number; b: number; a?: number }) };
@@ -519,7 +531,8 @@ function convertValue(
     // Figma TIMING values are plain numbers in SECONDS. DTCG duration uses
     // the structured `{ value, unit }` form — emit milliseconds.
     if (typeof rawValue === "number") {
-      return { literal: { value: rawValue * 1000, unit: "ms" } };
+      // Round the seconds first: ×1000 also scales the float32 noise.
+      return { literal: { value: round6(round6(rawValue) * 1000), unit: "ms" } };
     }
     warnings.push(
       `TIMING value for "${variable.name}" (mode "${modeName}") isn't a number: ${JSON.stringify(rawValue)} — emitting as string.`,
@@ -528,6 +541,26 @@ function convertValue(
   }
   if (resolvedType === "EASING") {
     const easing = rawValue as FigmaEasingValue;
+    // Plugin API MotionEasing. A bezier is exact for CUSTOM_CUBIC_BEZIER; a
+    // named preset also keeps its name in extensions so import restores the
+    // preset rather than an equivalent custom curve.
+    if (easing && typeof easing === "object" && typeof easing.type === "string") {
+      const cb = easing.easingFunctionCubicBezier;
+      if (cb && [cb.x1, cb.y1, cb.x2, cb.y2].every((n) => typeof n === "number")) {
+        const curve = { x1: round6(cb.x1), y1: round6(cb.y1), x2: round6(cb.x2), y2: round6(cb.y2) };
+        if (easing.type !== "CUSTOM_CUBIC_BEZIER") {
+          onMotionExtra({ easing: { type: easing.type, easingFunctionCubicBezier: curve } });
+        }
+        return { literal: [curve.x1, curve.y1, curve.x2, curve.y2] };
+      }
+      const stash: FigmaMotionEasing = { type: easing.type };
+      if (easing.easingFunctionSpring) stash.easingFunctionSpring = { bounce: round6(easing.easingFunctionSpring.bounce) };
+      onMotionExtra({ easing: stash });
+      warnings.push(
+        `EASING variable "${variable.name}" (mode "${modeName}") is ${easing.type} — DTCG cannot represent it. Emitted a fallback cubicBezier; the Figma easing is preserved in $extensions["figma-console-mcp"].easing.`,
+      );
+      return { literal: [...FALLBACK_EASING_BEZIER] };
+    }
     const b = easing?.bezierValues;
     if (
       b &&
@@ -547,11 +580,13 @@ function convertValue(
       warnings.push(
         `EASING variable "${variable.name}" (mode "${modeName}") is a spring (${easing.easingType ?? "unknown type"}) — DTCG cannot represent springs. Emitted a fallback cubicBezier; spring parameters preserved in $extensions["figma-console-mcp"].spring.`,
       );
-      onSpring({
-        easingType: easing.easingType,
-        springValues: easing.springValues,
+      onMotionExtra({
+        spring: {
+          easingType: easing.easingType,
+          springValues: easing.springValues,
+        },
       });
-      return { literal: [0.25, 0.1, 0.25, 1.0] };
+      return { literal: [...FALLBACK_EASING_BEZIER] };
     }
     warnings.push(
       `EASING value for "${variable.name}" (mode "${modeName}") has no usable bezierValues or springValues: ${JSON.stringify(rawValue)} — emitting as string.`,

@@ -7,7 +7,7 @@
  *   - ALIAS-TARGET UPDATES: references written as { type: "VARIABLE_ALIAS",
  *     id } when resolvable to an existing or just-created variable.
  *   - DELETE: strictly gated behind strategy "replace"; merge reports only.
- *   - TIMING/EASING create skip (Plugin API hard constraint).
+ *   - TIMING/EASING create and value conversion (seconds, MotionEasing).
  *   - Per-item error isolation (partial-success semantics).
  *
  * The Desktop Bridge connector is mocked; scripts sent to executeCodeViaUI
@@ -291,7 +291,7 @@ describe("import apply phase — buildCreatePlan", () => {
     expect(warnings.join("\n")).toContain('mode not found in existing Figma collection "Theme"');
   });
 
-  it("skips TIMING/EASING creates with a warning (Plugin API cannot create them)", () => {
+  it("creates TIMING and EASING variables (writable since Plugin API Update 133)", () => {
     const codeDoc = codeDocWith({
       setName: "Motion",
       entries: [
@@ -310,9 +310,8 @@ describe("import apply phase — buildCreatePlan", () => {
           values: { Default: { literal: [0.4, 0, 0.2, 1] } },
         },
         {
-          // Name-inferred duration WITHOUT a TIMING record stays skipped
-          // too (inferFigmaResolvedType maps duration → TIMING), but a
-          // recorded FLOAT must create as FLOAT.
+          // A recorded FLOAT must create as FLOAT even though its token
+          // type is duration (inferFigmaResolvedType maps duration → TIMING).
           path: ["delay", "short"],
           type: "duration",
           values: { Default: { literal: 200 } },
@@ -337,10 +336,44 @@ describe("import apply phase — buildCreatePlan", () => {
     );
 
     const planned = plan.newCollections[0]?.variables ?? [];
-    expect(planned.map((v) => v.key)).toEqual(["Motion::delay.short"]);
-    expect(planned[0].resolvedType).toBe("FLOAT");
-    expect(warnings.join("\n")).toContain("cannot create Timing");
-    expect(warnings.join("\n")).toContain("cannot create Easing");
+    const byKey = Object.fromEntries(planned.map((v) => [v.key, v]));
+    expect(byKey["Motion::duration.quick"]).toMatchObject({ resolvedType: "TIMING", values: [{ kind: "literal", value: 0.3 }] });
+    expect(byKey["Motion::easing.standard"]).toMatchObject({
+      resolvedType: "EASING",
+      values: [{ kind: "literal", value: { type: "CUSTOM_CUBIC_BEZIER", easingFunctionCubicBezier: { x1: 0.4, y1: 0, x2: 0.2, y2: 1 } } }],
+    });
+    expect(byKey["Motion::delay.short"]).toMatchObject({ resolvedType: "FLOAT", values: [{ kind: "literal", value: 200 }] });
+    expect(warnings).toEqual([]);
+  });
+
+  describe("tokenValueToFigma: motion values", () => {
+    it("TIMING takes milliseconds or seconds and writes seconds", () => {
+      expect(tokenValueToFigma({ literal: { value: 300, unit: "ms" } }, "TIMING")).toEqual({ kind: "value", value: 0.3 });
+      expect(tokenValueToFigma({ literal: { value: 0.5, unit: "s" } }, "TIMING")).toEqual({ kind: "value", value: 0.5 });
+      expect(tokenValueToFigma({ literal: "0.25s" }, "TIMING")).toEqual({ kind: "value", value: 0.25 });
+      expect(tokenValueToFigma({ literal: "150ms" }, "TIMING")).toEqual({ kind: "value", value: 0.15 });
+      expect(tokenValueToFigma({ literal: "fast" }, "TIMING").kind).toBe("skip-invalid");
+    });
+
+    it("EASING restores a preset or spring while $value is what export emitted", () => {
+      const preset = { type: "EASE_OUT", easingFunctionCubicBezier: { x1: 0, y1: 0, x2: 0.58, y2: 1 } };
+      expect(tokenValueToFigma({ literal: [0, 0, 0.58, 1] }, "EASING", preset)).toEqual({ kind: "value", value: { type: "EASE_OUT" } });
+
+      const spring = { type: "CUSTOM_SPRING", easingFunctionSpring: { bounce: 0.6 } };
+      expect(tokenValueToFigma({ literal: [0.25, 0.1, 0.25, 1] }, "EASING", spring)).toEqual({
+        kind: "value",
+        value: { type: "CUSTOM_SPRING", easingFunctionSpring: { bounce: 0.6 } },
+      });
+    });
+
+    it("EASING writes an edited $value as a custom curve, and rejects a non-curve", () => {
+      const preset = { type: "EASE_OUT", easingFunctionCubicBezier: { x1: 0, y1: 0, x2: 0.58, y2: 1 } };
+      expect(tokenValueToFigma({ literal: [0.4, 0, 0.2, 1] }, "EASING", preset)).toEqual({
+        kind: "value",
+        value: { type: "CUSTOM_CUBIC_BEZIER", easingFunctionCubicBezier: { x1: 0.4, y1: 0, x2: 0.2, y2: 1 } },
+      });
+      expect(tokenValueToFigma({ literal: "ease-in" }, "EASING").kind).toBe("skip-invalid");
+    });
   });
 
   it("resolves aliases: existing target → alias, within-batch target → alias-pending, unresolvable → warning", () => {

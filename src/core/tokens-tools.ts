@@ -16,8 +16,8 @@
  *       • toCreate — missing collections (created with the token file's
  *         full mode list) and missing variables in one batched script;
  *         literal values first, alias values in a second pass so
- *         within-batch alias targets exist. TIMING/EASING cannot be
- *         created via the Plugin API and are skipped with a warning.
+ *         within-batch alias targets exist. TIMING (duration) and
+ *         EASING (cubicBezier) variables write since Plugin API Update 133.
  *       • toDelete — STRICTLY gated behind strategy: "replace". Merge
  *         (default) preserves Figma-only variables and only reports them.
  *
@@ -46,7 +46,8 @@ import {
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import { createChildLogger } from "./logger.js";
-import type { ComposedColor } from "./tokens/types.js";
+import type { ComposedColor, FigmaMotionEasing } from "./tokens/types.js";
+import { FALLBACK_EASING_BEZIER } from "./tokens/figma-converter.js";
 import { augmentWithExtendedCollections, countOverrides } from "./extended-collections.js";
 import {
   buildTokenLookup,
@@ -118,7 +119,7 @@ const IMPORT_TOOL_DESCRIPTION = `Push design tokens from your codebase into Figm
 
 ACCEPTS: DTCG JSON (canonical, fully supported including round-trip metadata preservation). Tokens Studio JSON, CSS custom properties, Tailwind v4 @theme, SCSS, and Style Dictionary v3 are scaffolded but return a NotImplementedError — convert to DTCG first via figma_export_tokens or hand-author DTCG. Use \`format: "auto"\` to sniff the input.
 
-APPLY PHASE (full bidirectional sync): toCreate entries create missing collections (with the token file's full mode list) and missing variables in one batched plugin round-trip — literal values first, alias values in a second pass so aliases between newly-created variables resolve. toUpdate entries push value updates in a batched round-trip, INCLUDING alias-target updates: when a token's value is a reference, it's written as a Figma variable alias if the reference resolves to an existing or just-created variable (unresolvable references skip with a warning). toDelete entries are STRICTLY gated behind \`strategy: "replace"\` — in replace mode, Figma variables absent from the token file are permanently deleted (a loud warning lists the count); merge (default) preserves them and only reports. TIMING/EASING variables cannot be created or written via the Plugin API and are skipped with a warning. Variable scopes and per-platform codeSyntax (from \`$extensions["figma-console-mcp"].scopes/.codeSyntax\`) are diffed and applied too — absent fields mean "no opinion" (Figma-side metadata is preserved), an explicit value is authoritative. Partial-success semantics: per-item errors surface in applyResult.errors[] without failing the batch.
+APPLY PHASE (full bidirectional sync): toCreate entries create missing collections (with the token file's full mode list) and missing variables in one batched plugin round-trip — literal values first, alias values in a second pass so aliases between newly-created variables resolve. toUpdate entries push value updates in a batched round-trip, INCLUDING alias-target updates: when a token's value is a reference, it's written as a Figma variable alias if the reference resolves to an existing or just-created variable (unresolvable references skip with a warning). toDelete entries are STRICTLY gated behind \`strategy: "replace"\` — in replace mode, Figma variables absent from the token file are permanently deleted (a loud warning lists the count); merge (default) preserves them and only reports. duration tokens write as TIMING variables (seconds) and cubicBezier tokens as EASING variables; an easing exported from a Figma preset or spring is restored from $extensions while its $value is unchanged. Variable scopes and per-platform codeSyntax (from \`$extensions["figma-console-mcp"].scopes/.codeSyntax\`) are diffed and applied too — absent fields mean "no opinion" (Figma-side metadata is preserved), an explicit value is authoritative. Partial-success semantics: per-item errors surface in applyResult.errors[] without failing the batch.
 
 DIFF-AWARE: Default \`strategy: "merge"\` diffs against current Figma state and applies only deltas. The hacked-color scenario — designer edits one hex value in their CSS — produces exactly one Figma API update, not a full collection rewrite. Match priority: Figma variable ID (in \`$extensions["figma-console-mcp"].variableId\`), then exact token path, then value fingerprint.
 
@@ -849,7 +850,7 @@ async function handleImport(
                     diff.toCreate.length === 0 &&
                     diff.toRename.length === 0
                   ? "Nothing to apply — all tokens already in sync."
-                  : "Changes were detected but skipped (likely all unresolvable aliases or non-writable TIMING/EASING types — see warnings).",
+                  : "Changes were detected but skipped (likely all unresolvable aliases or unconvertible values — see warnings).",
             deleteNote: deleteWarning
               ? deleteWarning
               : diff.toDelete.length > 0
@@ -1872,7 +1873,7 @@ export function makeAliasIdResolver(
 interface VariableUpdate {
   variableId: string;
   variableName: string;
-  resolvedType: "COLOR" | "FLOAT" | "STRING" | "BOOLEAN";
+  resolvedType: "COLOR" | "FLOAT" | "STRING" | "BOOLEAN" | "TIMING" | "EASING";
   valuesByMode: Record<string, unknown>; // modeId → Figma-native value
   /**
    * Rename op: set `variable.name` to this '/'-joined path before any value
@@ -1939,6 +1940,8 @@ function buildCollectionModeMap(
 export function tokenValueToFigma(
   value: { literal?: unknown; reference?: string; composed?: ComposedColor },
   resolvedType: VariableUpdate["resolvedType"],
+  /** EASING only: this mode's $extensions easing (preset or spring), if any. */
+  figmaEasing?: FigmaMotionEasing,
 ):
   | { kind: "value"; value: unknown }
   | { kind: "skip-alias"; reference: string }
@@ -2030,10 +2033,69 @@ export function tokenValueToFigma(
     figmaValue = parsed;
   } else if (resolvedType === "BOOLEAN") {
     figmaValue = Boolean(value.literal);
+  } else if (resolvedType === "TIMING") {
+    // Figma TIMING holds seconds; parseNumericLiteral yields milliseconds.
+    const ms = parseDurationMs(value.literal);
+    if (Number.isNaN(ms) || ms < 0) {
+      return {
+        kind: "skip-invalid",
+        reason: `cannot convert ${JSON.stringify(value.literal)} to a duration for a TIMING variable`,
+      };
+    }
+    figmaValue = ms / 1000;
+  } else if (resolvedType === "EASING") {
+    const converted = cubicBezierToFigmaEasing(value.literal, figmaEasing);
+    if (!converted) {
+      return {
+        kind: "skip-invalid",
+        reason: `cannot convert ${JSON.stringify(value.literal)} to an easing (expected a cubicBezier [x1, y1, x2, y2])`,
+      };
+    }
+    figmaValue = converted;
   } else {
     figmaValue = typeof value.literal === "string" ? value.literal : String(value.literal);
   }
   return { kind: "value", value: figmaValue };
+}
+
+/**
+ * A duration literal in milliseconds: a bare number is milliseconds, "0.3s"
+ * and { value: 0.3, unit: "s" } are seconds. (parseNumericLiteral drops the
+ * unit of a string, so "0.3s" would read as 0.3 ms.)
+ */
+function parseDurationMs(literal: unknown): number {
+  if (typeof literal === "string") {
+    const match = literal.trim().match(/^(-?(?:\d+\.?\d*|\.\d+))\s*(ms|s)?$/i);
+    if (!match) return NaN;
+    const n = Number(match[1]);
+    return match[2]?.toLowerCase() === "s" ? n * 1000 : n;
+  }
+  return parseNumericLiteral(literal);
+}
+
+/**
+ * A DTCG cubicBezier [x1, y1, x2, y2] as a Figma MotionEasing. When the
+ * token was exported from a named preset or a spring (`figmaEasing`, from
+ * $extensions) and its $value is still what export emitted, the preset or
+ * spring is written back; an edited $value becomes a custom curve.
+ */
+function cubicBezierToFigmaEasing(literal: unknown, figmaEasing?: FigmaMotionEasing): FigmaMotionEasing | null {
+  if (!Array.isArray(literal) || literal.length !== 4 || !literal.every((n) => typeof n === "number" && Number.isFinite(n))) {
+    return null;
+  }
+  const [x1, y1, x2, y2] = literal as number[];
+  if (figmaEasing && typeof figmaEasing.type === "string") {
+    // Export emitted the preset's own curve, or the fallback for an easing
+    // with none (spring, HOLD). Anything else is an edit.
+    const cb = figmaEasing.easingFunctionCubicBezier;
+    const emitted = cb ? [cb.x1, cb.y1, cb.x2, cb.y2] : FALLBACK_EASING_BEZIER;
+    if (literal.every((n, i) => Math.abs(n - emitted[i]) < 1e-6)) {
+      return figmaEasing.easingFunctionSpring
+        ? { type: figmaEasing.type, easingFunctionSpring: { ...figmaEasing.easingFunctionSpring } }
+        : { type: figmaEasing.type };
+    }
+  }
+  return { type: "CUSTOM_CUBIC_BEZIER", easingFunctionCubicBezier: { x1, y1, x2, y2 } };
 }
 
 /**
@@ -2102,9 +2164,8 @@ function colorObjectToFigmaRgba(
  *     raw 0.3 instead, the diff would report a change, apply would write a
  *     1000x-wrong value, and every subsequent import would rewrite it
  *     forever. Other units (px/rem/…) keep the raw value — Figma FLOAT is
- *     unitless. True TIMING-typed variables are skipped before import ever
- *     reaches this path (Plugin API can't write them), so plain FLOAT is
- *     the only consumer here.
+ *     unitless. TIMING variables read it through parseDurationMs, which also
+ *     honors a unit on a string ("0.3s").
  * Anything unparseable returns NaN — callers must skip (never push NaN
  * into setValueForMode).
  */
@@ -2239,18 +2300,8 @@ function buildUpdatePayloads(
         ? recordedType
         : inferFigmaResolvedType(figmaToken.type);
 
-    if (figmaNativeType === "TIMING" || figmaNativeType === "EASING") {
-      // The Figma Plugin API cannot create or setValueForMode on
-      // TIMING/EASING variables — only BOOLEAN/COLOR/FLOAT/STRING are
-      // writable. Sending these would be rejected (or worse); skip loudly.
-      warnings.push(
-        `Skipped ${entry.path} — Figma Plugin API cannot write ${
-          figmaNativeType === "TIMING" ? "Timing" : "Easing"
-        } variables (only BOOLEAN/COLOR/FLOAT/STRING are writable). Update this variable in the Figma UI instead.`,
-      );
-      continue;
-    }
     const resolvedType = figmaNativeType as VariableUpdate["resolvedType"];
+    const easingByMode = codeMatch.token.extensions?.["figma-console-mcp"]?.easing;
 
     // Value updates apply unless the diff explicitly flagged this entry as
     // metadata-only (changes.values === false) — re-pushing unchanged values
@@ -2269,7 +2320,7 @@ function buildUpdatePayloads(
         );
         continue;
       }
-      const conversion = tokenValueToFigma(value as any, resolvedType);
+      const conversion = tokenValueToFigma(value as any, resolvedType, easingByMode?.[modeName]);
       if (conversion.kind === "composed") {
         const part = (p: ComposedPart<unknown>) => {
           if ("value" in p) return { ok: true as const, v: p.value };
@@ -2373,11 +2424,8 @@ function buildUpdatePayloads(
 /**
  * Map our internal TokenType to Figma's variable resolvedType.
  *
- * duration/cubicBezier map to the Config-2026 TIMING/EASING variable types
- * — but note the Figma Plugin API CANNOT create or setValueForMode on
- * TIMING/EASING variables (only BOOLEAN/COLOR/FLOAT/STRING are writable),
- * so callers must skip those with a warning instead of pushing them.
- * buildUpdatePayloads prefers the extension-recorded figmaResolvedType over
+ * duration/cubicBezier map to the TIMING/EASING variable types, writable
+ * since Plugin API Update 133. buildUpdatePayloads prefers the extension-recorded figmaResolvedType over
  * this inference, so FLOAT variables whose token type was name-inferred as
  * "duration" still write correctly as FLOAT.
  */
@@ -2543,8 +2591,6 @@ export interface CreatePlan {
   }>;
 }
 
-const WRITABLE_RESOLVED_TYPES = new Set(["COLOR", "FLOAT", "STRING", "BOOLEAN"]);
-
 /**
  * Translate the diff's toCreate entries into a CreatePlan.
  *
@@ -2555,8 +2601,7 @@ const WRITABLE_RESOLVED_TYPES = new Set(["COLOR", "FLOAT", "STRING", "BOOLEAN"])
  *     with values pre-resolved to modeIds; values for modes the collection
  *     doesn't have are skipped with a warning.
  *   - resolvedType honors $extensions.figmaResolvedType when recorded, else
- *     falls back to inferFigmaResolvedType. TIMING/EASING variables are
- *     skipped with a warning — the Figma Plugin API cannot create them.
+ *     falls back to inferFigmaResolvedType.
  *   - Literal values convert via tokenValueToFigma (both DTCG dialects);
  *     alias values resolve via the alias-ID resolver (existing target →
  *     "alias", within-batch target → "alias-pending", unresolvable → skip
@@ -2618,14 +2663,6 @@ export function buildCreatePlan(
       )
         ? recorded
         : inferFigmaResolvedType(token.type);
-    if (!WRITABLE_RESOLVED_TYPES.has(figmaNativeType)) {
-      warnings.push(
-        `Skipped create for ${entry.path} — Figma Plugin API cannot create ${
-          figmaNativeType === "TIMING" ? "Timing" : "Easing"
-        } variables (only BOOLEAN/COLOR/FLOAT/STRING are creatable). Create this variable in the Figma UI instead.`,
-      );
-      continue;
-    }
     const resolvedType = figmaNativeType as VariableUpdate["resolvedType"];
 
     // Mode-name → modeId map for existing collections.
@@ -2674,7 +2711,11 @@ export function buildCreatePlan(
         continue;
       }
 
-      const conversion = tokenValueToFigma(value, resolvedType);
+      const conversion = tokenValueToFigma(
+        value,
+        resolvedType,
+        token.extensions?.["figma-console-mcp"]?.easing?.[modeName],
+      );
       if (conversion.kind === "skip-invalid") {
         warnings.push(
           `Skipped ${entry.path} (mode "${modeName}") — ${conversion.reason}.`,

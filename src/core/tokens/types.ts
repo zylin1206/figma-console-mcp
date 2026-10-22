@@ -143,6 +143,17 @@ export interface ComposedColor {
 }
 
 /**
+ * The value of a Figma EASING variable, as the Plugin API reads and writes it
+ * (Plugin API Update 133). Presets and CUSTOM_CUBIC_BEZIER carry a bezier;
+ * springs carry a normalized bounce.
+ */
+export interface FigmaMotionEasing {
+  type: string;
+  easingFunctionCubicBezier?: { x1: number; y1: number; x2: number; y2: number };
+  easingFunctionSpring?: { bounce: number };
+}
+
+/**
  * Our vendor namespace inside DTCG $extensions. Survives round-trip through
  * any DTCG-compliant tool that preserves $extensions verbatim (Style
  * Dictionary v4, Tokens Studio, Figma's announced 2026 native export, etc).
@@ -180,6 +191,13 @@ export interface FigmaMcpExtensions {
    * variables whose value can't be represented as a DTCG cubicBezier.
    */
   spring?: Record<string, unknown>;
+  /**
+   * Per mode, the Figma MotionEasing an EASING variable holds when its
+   * DTCG cubicBezier doesn't capture it fully: a named preset (EASE_OUT,
+   * GENTLE…), a spring, or HOLD. Import writes it back while the token's
+   * $value still matches what export emitted for it.
+   */
+  easing?: Record<string, FigmaMotionEasing>;
   /**
    * Figma variable scopes (e.g. ["FILL_COLOR", "STROKE_COLOR"]). OMITTED
    * when the variable has the default scoping (["ALL_SCOPES"] or empty) so
