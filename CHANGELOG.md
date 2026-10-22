@@ -7,19 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Design-system summary reads the file's tokens again. Server-only: **no plugin re-import needed**.
+Design-system summary and style tools read the file's own tokens and styles again. Server-only: **no plugin re-import needed**.
 
 ### Fixed
 
 - **`figma_get_design_system_summary` reported 0 tokens on every file.** It read the variables from a `.data` field the Desktop Bridge never sends; `EXECUTE_CODE` nests them under `result` (#68). The summary and `figma_get_token_values` now read them the way `variable-resolver.ts` does.
 - **Aliased number variables came out as 0.** A spacing variable pointing at another variable now resolves to its value in the default mode.
 - **The spacing scale mixed in radius and typography numbers** (it started at a letter spacing of -4.4). Only number variables scoped to gap or width/height, or left unscoped, count as spacing. The rest go to a new `other` group, typed by scope (`CORNER_RADIUS`, `FONT_SIZE`, `LETTER_SPACING`, …), as do string and boolean variables.
-- **Typography was always empty.** The summary now includes the file's local text styles.
+- **`figma_get_styles` and `figma_get_design_system_kit` returned no styles on an unpublished file.** Both read only the REST Styles API, which lists published library styles. They now read every local style through the Desktop Bridge (new `style-resolver.ts`, bridge-first like `variable-resolver.ts`), with its value: solid colors, gradient stops and image fills; typography; effects; layout grids; bound variable ids. REST stays the fallback when no bridge is connected, and `source` says which was used.
+- **The design-system summary left every style out** (typography, color, effect and grid all reported 0). It now reads them from the Desktop Bridge and reports `typography`, `paintStyles`, `effects` and `grids`.
+- **The server outlived its MCP client.** A client closes stdin when it quits but often sends no signal, and the WebSocket server kept the process alive, holding a port, for days. The server now exits when stdin closes.
 
 ### Changed
 
-- `figma_get_token_values` takes `type: "typography"` and `type: "other"`; `"all"` includes both.
-- The summary's token total counts every variable and text style, and `tokens.other` reports a count per type.
+- `figma_get_token_values` takes `type: "typography"`, `"styles"` (color, effect and grid style values) and `"other"`; `"all"` includes them.
+- The summary's token total counts every variable and style, and `tokens.other` reports a count per type.
 
 ## [1.40.9] - 2026-10-02
 

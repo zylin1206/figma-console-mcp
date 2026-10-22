@@ -36,6 +36,7 @@ import { registerVersionTools } from "./core/version-tools.js";
 import { registerAnnotationTools } from "./core/annotation-tools.js";
 import { registerDeepComponentTools } from "./core/deep-component-tools.js";
 import { registerDesignSystemTools } from "./core/design-system-tools.js";
+import { fetchBridgeStyles } from "./core/style-resolver.js";
 import { registerLibraryTools, registerLibraryVariableTools } from "./core/library-tools.js";
 import { registerAccessibilityTools } from "./core/accessibility-tools.js";
 import { registerDiagnoseTool } from "./core/diagnose-tool.js";
@@ -1792,7 +1793,7 @@ If Design Systems Assistant MCP is not available, install it from: https://githu
 				DesignSystemManifestCache,
 				createEmptyManifest,
 				addVariablesToManifest,
-				addTextStylesToManifest,
+				addStylesToManifest,
 				summarizeManifest,
 			} = await import("./core/design-system-manifest.js");
 
@@ -1817,7 +1818,7 @@ If Design Systems Assistant MCP is not available, install it from: https://githu
 			const manifest = createEmptyManifest(fileKey);
 			manifest.fileUrl = currentUrl || undefined;
 
-			// Get variables (tokens) and text styles (typography)
+			// Get variables (tokens) and styles (text, color, effect, grid)
 			try {
 				if (!addVariablesToManifest(manifest, await connector.getVariables(fileKey))) {
 					logger.warn({ fileKey }, "Desktop Bridge returned no variables");
@@ -1826,9 +1827,11 @@ If Design Systems Assistant MCP is not available, install it from: https://githu
 				logger.warn({ error }, "Could not fetch variables during auto-load");
 			}
 			try {
-				addTextStylesToManifest(manifest, await connector.getTextStyles());
+				const styles = await fetchBridgeStyles(connector, fileKey);
+				if (styles) addStylesToManifest(manifest, styles);
+				else logger.warn({ fileKey }, "Desktop Bridge returned no styles");
 			} catch (error) {
-				logger.warn({ error }, "Could not fetch text styles");
+				logger.warn({ error }, "Could not fetch styles");
 			}
 
 			// Get components
@@ -1934,7 +1937,7 @@ If Design Systems Assistant MCP is not available, install it from: https://githu
 						DesignSystemManifestCache,
 						createEmptyManifest,
 						addVariablesToManifest,
-						addTextStylesToManifest,
+						addStylesToManifest,
 						summarizeManifest,
 						getCategories,
 						getTokenSummary,
@@ -1985,7 +1988,7 @@ If Design Systems Assistant MCP is not available, install it from: https://githu
 					const manifest = createEmptyManifest(fileKey);
 					manifest.fileUrl = currentUrl || undefined;
 
-					// Get variables (tokens) and text styles (typography)
+					// Get variables (tokens) and styles (text, color, effect, grid)
 					try {
 						if (!addVariablesToManifest(manifest, await connector.getVariables(fileKey))) {
 							logger.warn({ fileKey }, "Desktop Bridge returned no variables");
@@ -1994,9 +1997,11 @@ If Design Systems Assistant MCP is not available, install it from: https://githu
 						logger.warn({ error }, "Could not fetch variables");
 					}
 					try {
-						addTextStylesToManifest(manifest, await connector.getTextStyles());
+						const styles = await fetchBridgeStyles(connector, fileKey);
+						if (styles) addStylesToManifest(manifest, styles);
+						else logger.warn({ fileKey }, "Desktop Bridge returned no styles");
 					} catch (error) {
-						logger.warn({ error }, "Could not fetch text styles");
+						logger.warn({ error }, "Could not fetch styles");
 					}
 
 					// Get components (can be slow for large files)
@@ -2552,10 +2557,10 @@ Without libraryFileKey/libraryFileUrl, searches the currently open file (local c
 		// Tool 4: Get Token Values (~2000 tokens response max)
 		this.server.tool(
 			"figma_get_token_values",
-			"Get actual values for design tokens (colors, spacing, typography, other). Use after figma_get_design_system_summary to get specific token values for implementation. 'spacing' holds gap/size variables; 'other' holds the remaining variables (corner radius, font size, line height, letter spacing, stroke, strings, booleans), each with its type; 'typography' holds the local text styles.",
+			"Get actual values for design tokens (colors, spacing, typography, other). Use after figma_get_design_system_summary to get specific token values for implementation. 'spacing' holds gap/size variables; 'other' holds the remaining variables (corner radius, font size, line height, letter spacing, stroke, strings, booleans), each with its type; 'typography' holds the local text styles; 'styles' holds the color (paint), effect and layout-grid styles.",
 			{
 				type: z
-					.enum(["colors", "spacing", "typography", "other", "all"])
+					.enum(["colors", "spacing", "typography", "styles", "other", "all"])
 					.optional()
 					.default("all")
 					.describe("Type of tokens to retrieve"),
@@ -2650,6 +2655,26 @@ Without libraryFileKey/libraryFileUrl, searches the currently open file (local c
 							}
 						}
 						result.typography = typography;
+					}
+
+					if (type === "styles" || type === "all") {
+						const pick = (bucket: Record<string, any>, field: string) => {
+							const out: Record<string, any> = {};
+							let count = 0;
+							for (const [name, token] of Object.entries(bucket)) {
+								if (count >= effectiveLimit) break;
+								if (!filterLower || name.toLowerCase().includes(filterLower)) {
+									out[name] = token[field];
+									count++;
+								}
+							}
+							return out;
+						};
+						result.styles = {
+							paint: pick(tokens.paintStyles, "paints"),
+							effect: pick(tokens.effects, "effects"),
+							grid: pick(tokens.grids, "grids"),
+						};
 					}
 
 					if (type === "other" || type === "all") {
@@ -4078,6 +4103,13 @@ async function main() {
 
 	process.on("SIGINT", () => { void gracefulExit(0); });
 	process.on("SIGTERM", () => { void gracefulExit(0); });
+
+	// Exit when the MCP client goes away. A client closes our stdin when it
+	// quits but often sends no signal, and the WebSocket server keeps the event
+	// loop alive — so the process outlived its client by days, holding a port.
+	// The periodic reaper never caught it: it refreshes its own port file.
+	process.stdin.once("end", () => { void gracefulExit(0); });
+	process.stdin.once("close", () => { void gracefulExit(0); });
 
 	// Start the server
 	await server.start();

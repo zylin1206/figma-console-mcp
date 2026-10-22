@@ -7,7 +7,7 @@
  */
 
 import {
-	addTextStylesToManifest,
+	addStylesToManifest,
 	addVariablesToManifest,
 	componentSearchLoadFailure,
 	fontWeightFromStyle,
@@ -41,6 +41,8 @@ function makeManifest(overrides: Partial<DesignSystemManifest> = {}): DesignSyst
 			spacing: {},
 			typography: {},
 			effects: {},
+			paintStyles: {},
+			grids: {},
 			other: {},
 		},
 		components: {},
@@ -290,6 +292,8 @@ describe("Design System Manifest", () => {
 					},
 					typography: {},
 					effects: {},
+					paintStyles: {},
+					grids: {},
 					other: {},
 				},
 				collections: [{ id: "c1", name: "Primitives", modes: [], defaultModeId: "m1" }],
@@ -313,6 +317,8 @@ describe("Design System Manifest", () => {
 					spacing: {},
 					typography: {},
 					effects: {},
+					paintStyles: {},
+					grids: {},
 					other: {},
 				},
 			});
@@ -333,6 +339,8 @@ describe("Design System Manifest", () => {
 					},
 					typography: {},
 					effects: {},
+					paintStyles: {},
+					grids: {},
 					other: {},
 				},
 			});
@@ -581,22 +589,20 @@ describe("fontWeightFromStyle", () => {
 	});
 });
 
-describe("addTextStylesToManifest", () => {
-	// The shape connector.getTextStyles() returns (GET_TEXT_STYLES_RESULT).
-	const textStyles = {
-		success: true,
-		data: {
-			count: 2,
-			styles: [
-				{ id: "S:1", name: "Display/1", description: "", fontSize: 48, fontFamily: "Inter", fontStyle: "Semi Bold", letterSpacing: { value: -2, unit: "PIXELS" }, lineHeight: { value: 56, unit: "PIXELS" }, textCase: "ORIGINAL", textDecoration: "NONE" },
-				{ id: "S:2", name: "Body/Base", description: "Body text", fontSize: 14, fontFamily: "Inter", fontStyle: "Regular", letterSpacing: { value: 0, unit: "PIXELS" }, lineHeight: { unit: "AUTO" }, textCase: "ORIGINAL", textDecoration: "NONE" },
-			],
-		},
-	};
+describe("addStylesToManifest", () => {
+	// The shape style-resolver.ts fetchBridgeStyles() returns.
+	const styles = [
+		{ id: "S:1", key: "k1", name: "Display/1", description: "", style_type: "TEXT", value: { typography: { fontFamily: "Inter", fontStyle: "Semi Bold", fontSize: 48, lineHeight: { unit: "PIXELS", value: 56 }, letterSpacing: { unit: "PIXELS", value: -2 }, textCase: "ORIGINAL", textDecoration: "NONE" } } },
+		{ id: "S:2", key: "k2", name: "Body/Base", description: "Body text", style_type: "TEXT", value: { typography: { fontFamily: "Inter", fontStyle: "Regular", fontSize: 14, lineHeight: { unit: "AUTO" }, letterSpacing: { unit: "PIXELS", value: 0 } } } },
+		{ id: "S:3", key: "k3", name: "Border/Glass", description: "", style_type: "FILL", value: { fills: [{ type: "GRADIENT_LINEAR", gradientStops: [{ position: 0, color: "#FFFFFF29" }, { position: 1, color: "#FFFFFF29" }] }] } },
+		{ id: "S:4", key: "k4", name: "Avatars/1", description: "", style_type: "FILL", value: { fills: [{ type: "IMAGE", imageHash: "abc" }] } },
+		{ id: "S:5", key: "k5", name: "Shadow/Basic", description: "", style_type: "EFFECT", value: { effects: [{ type: "DROP_SHADOW", radius: 24, color: "#0000000A", offset: { x: 0, y: 8 }, spread: -16 }] } },
+		{ id: "S:6", key: "k6", name: "12 col", description: "", style_type: "GRID", value: { grids: [{ pattern: "COLUMNS", count: 12, gutterSize: 24, offset: 80, alignment: "STRETCH" }] } },
+	];
 
-	it("adds each text style as a typography token", () => {
+	it("files text styles as typography tokens", () => {
 		const manifest = createEmptyManifest("key");
-		expect(addTextStylesToManifest(manifest, textStyles)).toBe(true);
+		addStylesToManifest(manifest, styles);
 		expect(manifest.tokens.typography["Display/1"]).toMatchObject({
 			fontFamily: "Inter",
 			fontSize: 48,
@@ -606,20 +612,34 @@ describe("addTextStylesToManifest", () => {
 			styleId: "S:1",
 		});
 		expect(manifest.tokens.typography["Body/Base"].lineHeight).toEqual({ value: 0, unit: "AUTO" });
+		expect(manifest.tokens.typography["Body/Base"].description).toBe("Body text");
 	});
 
-	it("counts text styles in the summary (regression: typography reported 0)", () => {
+	it("files color, effect and grid styles with their values", () => {
 		const manifest = createEmptyManifest("key");
-		addTextStylesToManifest(manifest, textStyles);
+		addStylesToManifest(manifest, styles);
+		expect(manifest.tokens.paintStyles["Border/Glass"].paints[0].type).toBe("GRADIENT_LINEAR");
+		expect(manifest.tokens.paintStyles["Avatars/1"].paints[0]).toMatchObject({ type: "IMAGE", imageHash: "abc" });
+		expect(manifest.tokens.effects["Shadow/Basic"]).toMatchObject({ type: "DROP_SHADOW", effects: [{ radius: 24, color: "#0000000A" }] });
+		expect(manifest.tokens.grids["12 col"].grids[0]).toMatchObject({ pattern: "COLUMNS", count: 12 });
+	});
+
+	it("counts every style in the summary (regression: typography, color, effect and grid reported 0)", () => {
+		const manifest = createEmptyManifest("key");
+		addStylesToManifest(manifest, styles);
 		summarizeManifest(manifest);
-		expect(manifest.summary.totalTokens).toBe(2);
+		expect(manifest.summary.totalTokens).toBe(6);
 		expect(manifest.summary.typographyScale).toEqual(["Display/1", "Body/Base"]);
-		expect(getTokenSummary(manifest).typography).toEqual({ count: 2, groups: ["Display", "Body"] });
+		const summary = getTokenSummary(manifest);
+		expect(summary.typography).toEqual({ count: 2, groups: ["Display", "Body"] });
+		expect(summary.paintStyles).toEqual({ count: 2, groups: ["Border", "Avatars"] });
+		expect(summary.effects).toEqual({ count: 1, groups: ["Shadow"] });
+		expect(summary.grids).toEqual({ count: 1, names: ["12 col"] });
 	});
 
-	it("returns false for a failed result", () => {
+	it("tolerates a style without a value (REST-shaped)", () => {
 		const manifest = createEmptyManifest("key");
-		expect(addTextStylesToManifest(manifest, { success: false, error: "not a design file" })).toBe(false);
-		expect(Object.keys(manifest.tokens.typography)).toHaveLength(0);
+		addStylesToManifest(manifest, [{ name: "Brand/Primary", style_type: "FILL" }]);
+		expect(manifest.tokens.paintStyles["Brand/Primary"].paints).toEqual([]);
 	});
 });

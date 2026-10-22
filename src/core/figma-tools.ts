@@ -15,6 +15,7 @@ import { EnrichmentService } from "./enrichment/index.js";
 import type { EnrichmentOptions } from "./types/enriched.js";
 import { extractNodeSpec, validateReconstructionSpec, listVariants } from "./figma-reconstruction-spec.js";
 import { augmentWithExtendedCollections, countOverrides, extendedCollectionView } from "./extended-collections.js";
+import { resolveStyles } from "./style-resolver.js";
 
 const logger = createChildLogger({ component: "figma-tools" });
 
@@ -2905,17 +2906,6 @@ export function registerFigmaAPITools(
 		},
 		async ({ fileUrl, verbosity, enrich, include_usage, include_exports, export_formats }) => {
 			try {
-				let api;
-				try {
-					api = await getFigmaAPI();
-				} catch (apiError) {
-					const errorMessage = apiError instanceof Error ? apiError.message : String(apiError);
-					throw restAuthError(
-						"Cannot retrieve styles. REST API authentication required.",
-						errorMessage,
-					);
-				}
-
 				const url = fileUrl || getCurrentUrl();
 				if (!url) {
 					throw new Error(
@@ -2930,15 +2920,25 @@ export function registerFigmaAPITools(
 
 			logger.info({ fileKey, verbosity, enrich }, "Fetching styles");
 
-			// Get styles via REST API
-			const stylesData = await api.getStyles(fileKey);
-			let styles = stylesData.meta?.styles || [];
-
-			logger.info(
-				{ styleCount: styles.length },
-				"Successfully retrieved styles via REST API"
-			);
-
+			// Bridge-first: the REST Styles API returns only PUBLISHED styles, so an
+			// unpublished design-system file came back with none. The Desktop Bridge
+			// reads every local style, with its value. REST is the fallback.
+			const resolved = await resolveStyles({
+				getDesktopConnector,
+				getFigmaAPI: async () => {
+					try {
+						return await getFigmaAPI();
+					} catch (apiError) {
+						const errorMessage = apiError instanceof Error ? apiError.message : String(apiError);
+						throw restAuthError(
+							"Cannot retrieve styles. Connect the Desktop Bridge plugin, or configure REST API authentication.",
+							errorMessage,
+						);
+					}
+				},
+				fileKey,
+			});
+			let styles: any[] = resolved.styles;
 
 				// Apply verbosity filtering
 				const filterStyle = (style: any, level: "summary" | "standard" | "full"): any => {
@@ -2954,13 +2954,15 @@ export function registerFigmaAPITools(
 					}
 
 					if (level === "standard") {
-						// Standard: Essential properties (~40% reduction)
+						// Standard: Essential properties (~40% reduction), plus the value
+						// when the Desktop Bridge supplied one
 						return {
 							key: style.key,
 							name: style.name,
 							description: style.description,
 							style_type: style.style_type,
 							...(style.remote && { remote: style.remote }),
+							...(style.value && { value: style.value }),
 						};
 					}
 
@@ -2994,10 +2996,20 @@ export function registerFigmaAPITools(
 					);
 				}
 
+				const stylesByType: Record<string, number> = {};
+				for (const style of styles) {
+					stylesByType[style.style_type] = (stylesByType[style.style_type] || 0) + 1;
+				}
+
 				const finalResponse = {
 					fileKey,
+					source: resolved.source,
+					...(resolved.source === "rest_api" && {
+						note: "REST API returns published styles only, without values. Open the Desktop Bridge plugin to read every local style with its value.",
+					}),
 					styles,
 					totalStyles: styles.length,
+					stylesByType,
 					verbosity: verbosity || "standard",
 					enriched: enrich || false,
 				};

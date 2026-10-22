@@ -12,6 +12,7 @@ import { z } from "zod";
 import type { FigmaAPI } from "./figma-api.js";
 import { extractFileKey, formatComponentData } from "./figma-api.js";
 import { resolveFormattedVariables } from "./variable-resolver.js";
+import { resolveStyles } from "./style-resolver.js";
 import { createChildLogger } from "./logger.js";
 
 const logger = createChildLogger({ component: "design-system-tools" });
@@ -911,23 +912,25 @@ export function registerDesignSystemTools(
 					try {
 						logger.info({ fileKey: resolvedFileKey }, "Fetching styles");
 
-						const stylesResponse = await withTimeout(
-							api.getStyles(resolvedFileKey),
-							30000,
-							"getStyles",
-						);
-						const allStyles = stylesResponse?.meta?.styles || [];
+						// Bridge-first: the REST Styles API returns only published styles,
+						// so an unpublished file had none. Bridge styles carry their value.
+						const { styles: allStyles } = await resolveStyles({
+							getDesktopConnector,
+							getFigmaAPI: async () => api,
+							fileKey: resolvedFileKey,
+						});
 
-						const styleSpecs: StyleSpec[] = allStyles.map((s: any) => ({
+						const styleSpecs: StyleSpec[] = allStyles.map((s) => ({
 							key: s.key,
 							name: s.name,
 							styleType: s.style_type,
 							description: s.description || undefined,
 							nodeId: s.node_id,
+							resolvedValue: s.value,
 						}));
 
-						// Resolve actual values for styles (colors, typography, effects)
-						if (styleSpecs.length > 0) {
+						// Resolve actual values for REST styles (colors, typography, effects)
+						if (styleSpecs.some((s) => s.nodeId && !s.resolvedValue)) {
 							try {
 								const resolvedValues = await resolveStyleValues(api, resolvedFileKey, styleSpecs);
 								for (const style of styleSpecs) {

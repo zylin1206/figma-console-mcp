@@ -42,10 +42,41 @@ export interface EffectToken {
 	type: 'DROP_SHADOW' | 'INNER_SHADOW' | 'LAYER_BLUR' | 'BACKGROUND_BLUR';
 	effects: Array<{
 		type: string;
-		color?: { r: number; g: number; b: number; a: number };
+		color?: string | { r: number; g: number; b: number; a: number };  // hex from the Desktop Bridge
 		offset?: { x: number; y: number };
 		radius?: number;
 		spread?: number;
+		visible?: boolean;
+	}>;
+	styleId?: string;
+	description?: string;
+}
+
+export interface PaintStyleToken {
+	name: string;
+	// Paints as the Desktop Bridge reports them: SOLID with a hex color,
+	// gradients with hex stops, IMAGE with its hash
+	paints: Array<{
+		type: string;
+		color?: string;
+		opacity?: number;
+		gradientStops?: Array<{ position: number; color: string }>;
+		imageHash?: string;
+		visible?: boolean;
+	}>;
+	styleId?: string;
+	description?: string;
+}
+
+export interface GridStyleToken {
+	name: string;
+	grids: Array<{
+		pattern: 'COLUMNS' | 'ROWS' | 'GRID';
+		count?: number;
+		sectionSize?: number;
+		gutterSize?: number;
+		offset?: number;
+		alignment?: string;
 		visible?: boolean;
 	}>;
 	styleId?: string;
@@ -153,6 +184,8 @@ export interface DesignSystemManifest {
 		spacing: Record<string, SpacingToken>;
 		typography: Record<string, TypographyToken>;
 		effects: Record<string, EffectToken>;
+		paintStyles: Record<string, PaintStyleToken>;
+		grids: Record<string, GridStyleToken>;
 		other: Record<string, {
 			name: string;
 			type: string;
@@ -423,7 +456,9 @@ export function getTokenSummary(manifest: DesignSystemManifest): {
 	colors: { count: number; groups: string[] };
 	spacing: { count: number; scale: number[] };
 	typography: { count: number; groups: string[] };
-	effects: { count: number };
+	effects: { count: number; groups: string[] };
+	paintStyles: { count: number; groups: string[] };
+	grids: { count: number; names: string[] };
 	other: { count: number; types: Record<string, number> };
 	collections: string[];
 } {
@@ -433,19 +468,10 @@ export function getTokenSummary(manifest: DesignSystemManifest): {
 		otherTypes[token.type] = (otherTypes[token.type] || 0) + 1;
 	}
 
-	// Group colors by prefix (e.g., "primary/500" -> "primary")
-	const colorGroups = new Set<string>();
-	for (const name of Object.keys(manifest.tokens.colors)) {
-		const group = name.split('/')[0];
-		colorGroups.add(group);
-	}
-
-	// Group typography by prefix
-	const typographyGroups = new Set<string>();
-	for (const name of Object.keys(manifest.tokens.typography)) {
-		const group = name.split('/')[0];
-		typographyGroups.add(group);
-	}
+	// Group names by prefix (e.g., "primary/500" -> "primary")
+	const groupsOf = (names: string[]) => Array.from(new Set(names.map((n) => n.split('/')[0])));
+	const colorGroups = groupsOf(Object.keys(manifest.tokens.colors));
+	const typographyGroups = groupsOf(Object.keys(manifest.tokens.typography));
 
 	// Get spacing scale values
 	const spacingValues = Object.values(manifest.tokens.spacing)
@@ -456,7 +482,7 @@ export function getTokenSummary(manifest: DesignSystemManifest): {
 	return {
 		colors: {
 			count: Object.keys(manifest.tokens.colors).length,
-			groups: Array.from(colorGroups).slice(0, 10),
+			groups: colorGroups.slice(0, 10),
 		},
 		spacing: {
 			count: Object.keys(manifest.tokens.spacing).length,
@@ -464,10 +490,19 @@ export function getTokenSummary(manifest: DesignSystemManifest): {
 		},
 		typography: {
 			count: Object.keys(manifest.tokens.typography).length,
-			groups: Array.from(typographyGroups).slice(0, 10),
+			groups: typographyGroups.slice(0, 10),
 		},
 		effects: {
 			count: Object.keys(manifest.tokens.effects).length,
+			groups: groupsOf(Object.keys(manifest.tokens.effects)).slice(0, 10),
+		},
+		paintStyles: {
+			count: Object.keys(manifest.tokens.paintStyles).length,
+			groups: groupsOf(Object.keys(manifest.tokens.paintStyles)).slice(0, 10),
+		},
+		grids: {
+			count: Object.keys(manifest.tokens.grids).length,
+			names: Object.keys(manifest.tokens.grids).slice(0, 10),
 		},
 		other: {
 			count: Object.keys(manifest.tokens.other).length,
@@ -502,7 +537,7 @@ export function makeFigmaColorResolver(
 ): (value: any) => string {
 	const byId = new Map(variables.map((v) => [v.id, v]));
 	const defaultMode = new Map(collections.map((c) => [c.id, c.defaultModeId]));
-	const valueOf = (id: string): any => {
+	const defaultValueOf = (id: string): any => {
 		const v = byId.get(id);
 		if (!v?.valuesByMode) return undefined;
 		const mode = (v.variableCollectionId && defaultMode.get(v.variableCollectionId)) || Object.keys(v.valuesByMode)[0];
@@ -510,7 +545,7 @@ export function makeFigmaColorResolver(
 	};
 	const resolve = (value: any, depth: number): any => {
 		if (depth > 20 || value === undefined || value === null) return undefined;
-		if (typeof value === 'object' && value.type === 'VARIABLE_ALIAS') return resolve(valueOf(value.id), depth + 1);
+		if (typeof value === 'object' && value.type === 'VARIABLE_ALIAS') return resolve(defaultValueOf(value.id), depth + 1);
 		if (typeof value === 'object' && 'color' in value && 'opacity' in value && !('r' in value)) {
 			const color = resolve(value.color, depth + 1);
 			const opacity = resolve(value.opacity, depth + 1);
@@ -654,48 +689,59 @@ export function fontWeightFromStyle(style?: string): number {
 }
 
 /**
- * Add the local text styles (connector.getTextStyles(), shaped
- * { success, data: { styles } }) to the manifest's typography tokens. The
- * summary used to leave typography empty even on files with text styles.
- * Returns false when no styles came back.
+ * Add the Desktop Bridge's local styles (style-resolver.ts fetchBridgeStyles:
+ * { style_type, name, id, description, value }) to the manifest — TEXT →
+ * typography, FILL → paintStyles, EFFECT → effects, GRID → grids. The summary
+ * used to leave all four empty even on files with dozens of styles.
  */
-export function addTextStylesToManifest(manifest: DesignSystemManifest, raw: any): boolean {
-	const styles = raw?.success ? raw.data?.styles : undefined;
-	if (!Array.isArray(styles)) return false;
-
+export function addStylesToManifest(
+	manifest: DesignSystemManifest,
+	styles: Array<{ style_type: string; name: string; id?: string; description?: string; value?: Record<string, any> }>,
+): void {
 	for (const style of styles) {
-		const lineHeight = style.lineHeight;
-		manifest.tokens.typography[style.name] = {
-			name: style.name,
-			fontFamily: style.fontFamily,
-			fontSize: style.fontSize,
-			fontWeight: fontWeightFromStyle(style.fontStyle),
-			lineHeight:
-				lineHeight && typeof lineHeight === 'object'
-					? { value: lineHeight.value ?? 0, unit: lineHeight.unit }
-					: lineHeight ?? 0,
-			letterSpacing: typeof style.letterSpacing === 'object' ? style.letterSpacing?.value : style.letterSpacing,
-			textCase: style.textCase,
-			textDecoration: style.textDecoration,
-			styleId: style.id,
-			description: style.description || undefined,
-		};
+		const base = { name: style.name, styleId: style.id, description: style.description || undefined };
+		const value = style.value || {};
+
+		if (style.style_type === 'TEXT') {
+			const t = value.typography || {};
+			manifest.tokens.typography[style.name] = {
+				...base,
+				fontFamily: t.fontFamily,
+				fontSize: t.fontSize,
+				fontWeight: fontWeightFromStyle(t.fontStyle),
+				lineHeight:
+					t.lineHeight && typeof t.lineHeight === 'object'
+						? { value: t.lineHeight.value ?? 0, unit: t.lineHeight.unit }
+						: t.lineHeight ?? 0,
+				letterSpacing: typeof t.letterSpacing === 'object' ? t.letterSpacing?.value : t.letterSpacing,
+				textCase: t.textCase,
+				textDecoration: t.textDecoration,
+			};
+		} else if (style.style_type === 'FILL') {
+			manifest.tokens.paintStyles[style.name] = { ...base, paints: value.fills || [] };
+		} else if (style.style_type === 'EFFECT') {
+			const effects = value.effects || [];
+			manifest.tokens.effects[style.name] = { ...base, type: effects[0]?.type, effects };
+		} else if (style.style_type === 'GRID') {
+			manifest.tokens.grids[style.name] = { ...base, grids: value.grids || [] };
+		}
 	}
-	return true;
 }
 
 /**
  * Recompute the manifest summary from its tokens and components. Every
- * variable and text style counts as a token.
+ * variable and every style counts as a token.
  */
 export function summarizeManifest(manifest: DesignSystemManifest): void {
-	const { colors, spacing, typography, effects, other } = manifest.tokens;
+	const { colors, spacing, typography, effects, paintStyles, grids, other } = manifest.tokens;
 	manifest.summary = {
 		totalTokens:
 			Object.keys(colors).length +
 			Object.keys(spacing).length +
 			Object.keys(typography).length +
 			Object.keys(effects).length +
+			Object.keys(paintStyles).length +
+			Object.keys(grids).length +
 			Object.keys(other).length,
 		totalComponents: Object.keys(manifest.components).length,
 		totalComponentSets: Object.keys(manifest.componentSets).length,
@@ -762,6 +808,8 @@ export function createEmptyManifest(fileKey: string): DesignSystemManifest {
 			spacing: {},
 			typography: {},
 			effects: {},
+			paintStyles: {},
+			grids: {},
 			other: {},
 		},
 		components: {},

@@ -849,7 +849,9 @@ figma_get_variables({ refreshCache: true })
 
 ### `figma_get_styles`
 
-Get all styles (color, text, effects) from a Figma file.
+Get all styles (color, text, effect, layout grid) from a Figma file.
+
+With the Desktop Bridge plugin open, every **local** style is read through the Plugin API, published or not, with its value. Without it, the REST Styles API is used, which returns **published** library styles only, without values; the response's `source` says which (`desktop_bridge` or `rest_api`).
 
 **Usage:**
 ```javascript
@@ -870,8 +872,8 @@ figma_get_styles({
 - `include_exports` (optional): Include code examples
 
 **Returns:**
-- All styles (color, text, effect, grid)
-- Style metadata and properties
+- All styles (color, text, effect, grid), with `stylesByType` counts
+- Style metadata, and from the Desktop Bridge each style's `value`: `fills` (solid hex, gradient stops, image hash), `typography`, `effects` or `grids`, with any bound variable ids
 - Export code (if `enrich: true`)
 - Usage information (if requested)
 
@@ -2506,7 +2508,7 @@ Get token values from the design-system cache, by type, in each collection's def
 **Usage:**
 ```javascript
 figma_get_token_values({
-  type: "spacing",    // Optional: colors | spacing | typography | other | all (default)
+  type: "spacing",    // Optional: colors | spacing | typography | styles | other | all (default)
   filter: "gap",      // Optional: substring of the token name
   limit: 50           // Optional: max tokens per type (default 50, max 100)
 })
@@ -2516,6 +2518,7 @@ figma_get_token_values({
 - `colors` — color variables as hex, with their scopes
 - `spacing` — number variables scoped to gap or width/height (or unscoped)
 - `typography` — local text styles (family, size, weight, line height, letter spacing)
+- `styles` — local color (paint), effect and layout-grid styles with their values
 - `other` — every other variable (corner radius, font size, line height, letter spacing, stroke, string, boolean), each with its `type`
 
 ---
