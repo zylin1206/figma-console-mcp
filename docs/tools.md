@@ -2499,21 +2499,24 @@ figma_get_design_system_summary()
 
 ### `figma_get_token_values`
 
-Get all variable values organized by collection and mode.
+Get token values from the design-system cache, by type, in each collection's default mode (aliases resolved).
 
 **Mode:** Local (not available in Cloud Mode)
 
 **Usage:**
 ```javascript
 figma_get_token_values({
-  collectionName: "Brand Colors"  // Optional: filter by collection
+  type: "spacing",    // Optional: colors | spacing | typography | other | all (default)
+  filter: "gap",      // Optional: substring of the token name
+  limit: 50           // Optional: max tokens per type (default 50, max 100)
 })
 ```
 
 **Returns:**
-- Variables organized by collection
-- Values for each mode
-- Variable metadata
+- `colors` — color variables as hex, with their scopes
+- `spacing` — number variables scoped to gap or width/height (or unscoped)
+- `typography` — local text styles (family, size, weight, line height, letter spacing)
+- `other` — every other variable (corner radius, font size, line height, letter spacing, stroke, string, boolean), each with its `type`
 
 ---
 

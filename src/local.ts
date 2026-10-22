@@ -1791,7 +1791,9 @@ If Design Systems Assistant MCP is not available, install it from: https://githu
 			const {
 				DesignSystemManifestCache,
 				createEmptyManifest,
-				makeFigmaColorResolver,
+				addVariablesToManifest,
+				addTextStylesToManifest,
+				summarizeManifest,
 			} = await import("./core/design-system-manifest.js");
 
 			const cache = DesignSystemManifestCache.getInstance();
@@ -1815,50 +1817,18 @@ If Design Systems Assistant MCP is not available, install it from: https://githu
 			const manifest = createEmptyManifest(fileKey);
 			manifest.fileUrl = currentUrl || undefined;
 
-			// Get variables (tokens)
+			// Get variables (tokens) and text styles (typography)
 			try {
-				const variablesResult = await connector.getVariables(fileKey);
-				if (variablesResult.success && variablesResult.data) {
-					for (const collection of variablesResult.data.variableCollections ||
-						[]) {
-						manifest.collections.push({
-							id: collection.id,
-							name: collection.name,
-							modes: collection.modes.map((m: any) => ({
-								modeId: m.modeId,
-								name: m.name,
-							})),
-							defaultModeId: collection.defaultModeId,
-						});
-					}
-					const colorHex = makeFigmaColorResolver(variablesResult.data.variables || [], manifest.collections);
-					for (const variable of variablesResult.data.variables || []) {
-						const tokenName = variable.name;
-						const defaultModeId = manifest.collections.find(
-							(c: any) => c.id === variable.variableCollectionId,
-						)?.defaultModeId;
-						const defaultValue = defaultModeId
-							? variable.valuesByMode?.[defaultModeId]
-							: undefined;
-
-						if (variable.resolvedType === "COLOR") {
-							manifest.tokens.colors[tokenName] = {
-								name: tokenName,
-								value: colorHex(defaultValue),
-								variableId: variable.id,
-								scopes: variable.scopes,
-							};
-						} else if (variable.resolvedType === "FLOAT") {
-							manifest.tokens.spacing[tokenName] = {
-								name: tokenName,
-								value: typeof defaultValue === "number" ? defaultValue : 0,
-								variableId: variable.id,
-							};
-						}
-					}
+				if (!addVariablesToManifest(manifest, await connector.getVariables(fileKey))) {
+					logger.warn({ fileKey }, "Desktop Bridge returned no variables");
 				}
 			} catch (error) {
 				logger.warn({ error }, "Could not fetch variables during auto-load");
+			}
+			try {
+				addTextStylesToManifest(manifest, await connector.getTextStyles());
+			} catch (error) {
+				logger.warn({ error }, "Could not fetch text styles");
 			}
 
 			// Get components
@@ -1914,20 +1884,7 @@ If Design Systems Assistant MCP is not available, install it from: https://githu
 			}
 
 			// Update summary
-			manifest.summary = {
-				totalTokens:
-					Object.keys(manifest.tokens.colors).length +
-					Object.keys(manifest.tokens.spacing).length,
-				totalComponents: Object.keys(manifest.components).length,
-				totalComponentSets: Object.keys(manifest.componentSets).length,
-				colorPalette: Object.keys(manifest.tokens.colors).slice(0, 10),
-				spacingScale: Object.values(manifest.tokens.spacing)
-					.map((s: any) => s.value)
-					.sort((a: number, b: number) => a - b)
-					.slice(0, 10),
-				typographyScale: [],
-				componentCategories: [],
-			};
+			summarizeManifest(manifest);
 
 			// Cache the result — but never cache a manifest built from a FAILED
 			// components fetch: serving an empty manifest as "cached" for the full
@@ -1976,7 +1933,9 @@ If Design Systems Assistant MCP is not available, install it from: https://githu
 					const {
 						DesignSystemManifestCache,
 						createEmptyManifest,
-						makeFigmaColorResolver,
+						addVariablesToManifest,
+						addTextStylesToManifest,
+						summarizeManifest,
 						getCategories,
 						getTokenSummary,
 					} = await import("./core/design-system-manifest.js");
@@ -2026,50 +1985,18 @@ If Design Systems Assistant MCP is not available, install it from: https://githu
 					const manifest = createEmptyManifest(fileKey);
 					manifest.fileUrl = currentUrl || undefined;
 
-					// Get variables (tokens)
+					// Get variables (tokens) and text styles (typography)
 					try {
-						const variablesResult = await connector.getVariables(fileKey);
-						if (variablesResult.success && variablesResult.data) {
-							for (const collection of variablesResult.data
-								.variableCollections || []) {
-								manifest.collections.push({
-									id: collection.id,
-									name: collection.name,
-									modes: collection.modes.map((m: any) => ({
-										modeId: m.modeId,
-										name: m.name,
-									})),
-									defaultModeId: collection.defaultModeId,
-								});
-							}
-							const colorHex = makeFigmaColorResolver(variablesResult.data.variables || [], manifest.collections);
-							for (const variable of variablesResult.data.variables || []) {
-								const tokenName = variable.name;
-								const defaultModeId = manifest.collections.find(
-									(c) => c.id === variable.variableCollectionId,
-								)?.defaultModeId;
-								const defaultValue = defaultModeId
-									? variable.valuesByMode?.[defaultModeId]
-									: undefined;
-
-								if (variable.resolvedType === "COLOR") {
-									manifest.tokens.colors[tokenName] = {
-										name: tokenName,
-										value: colorHex(defaultValue),
-										variableId: variable.id,
-										scopes: variable.scopes,
-									};
-								} else if (variable.resolvedType === "FLOAT") {
-									manifest.tokens.spacing[tokenName] = {
-										name: tokenName,
-										value: typeof defaultValue === "number" ? defaultValue : 0,
-										variableId: variable.id,
-									};
-								}
-							}
+						if (!addVariablesToManifest(manifest, await connector.getVariables(fileKey))) {
+							logger.warn({ fileKey }, "Desktop Bridge returned no variables");
 						}
 					} catch (error) {
 						logger.warn({ error }, "Could not fetch variables");
+					}
+					try {
+						addTextStylesToManifest(manifest, await connector.getTextStyles());
+					} catch (error) {
+						logger.warn({ error }, "Could not fetch text styles");
 					}
 
 					// Get components (can be slow for large files)
@@ -2125,20 +2052,7 @@ If Design Systems Assistant MCP is not available, install it from: https://githu
 					}
 
 					// Update summary
-					manifest.summary = {
-						totalTokens:
-							Object.keys(manifest.tokens.colors).length +
-							Object.keys(manifest.tokens.spacing).length,
-						totalComponents: Object.keys(manifest.components).length,
-						totalComponentSets: Object.keys(manifest.componentSets).length,
-						colorPalette: Object.keys(manifest.tokens.colors).slice(0, 10),
-						spacingScale: Object.values(manifest.tokens.spacing)
-							.map((s) => s.value)
-							.sort((a, b) => a - b)
-							.slice(0, 10),
-						typographyScale: [],
-						componentCategories: [],
-					};
+					summarizeManifest(manifest);
 
 					// Cache the result — never cache a manifest built from a failed
 					// components fetch (would serve empty results for the full TTL).
@@ -2638,10 +2552,10 @@ Without libraryFileKey/libraryFileUrl, searches the currently open file (local c
 		// Tool 4: Get Token Values (~2000 tokens response max)
 		this.server.tool(
 			"figma_get_token_values",
-			"Get actual values for design tokens (colors, spacing, etc). Use after figma_get_design_system_summary to get specific token values for implementation.",
+			"Get actual values for design tokens (colors, spacing, typography, other). Use after figma_get_design_system_summary to get specific token values for implementation. 'spacing' holds gap/size variables; 'other' holds the remaining variables (corner radius, font size, line height, letter spacing, stroke, strings, booleans), each with its type; 'typography' holds the local text styles.",
 			{
 				type: z
-					.enum(["colors", "spacing", "all"])
+					.enum(["colors", "spacing", "typography", "other", "all"])
 					.optional()
 					.default("all")
 					.describe("Type of tokens to retrieve"),
@@ -2714,6 +2628,44 @@ Without libraryFileKey/libraryFileUrl, searches the currently open file (local c
 							}
 						}
 						result.spacing = spacing;
+					}
+
+					if (type === "typography" || type === "all") {
+						const typography: Record<string, any> = {};
+						let count = 0;
+						for (const [name, token] of Object.entries(tokens.typography) as [
+							string,
+							any,
+						][]) {
+							if (count >= effectiveLimit) break;
+							if (!filterLower || name.toLowerCase().includes(filterLower)) {
+								typography[name] = {
+									fontFamily: token.fontFamily,
+									fontSize: token.fontSize,
+									fontWeight: token.fontWeight,
+									lineHeight: token.lineHeight,
+									letterSpacing: token.letterSpacing,
+								};
+								count++;
+							}
+						}
+						result.typography = typography;
+					}
+
+					if (type === "other" || type === "all") {
+						const other: Record<string, any> = {};
+						let count = 0;
+						for (const [name, token] of Object.entries(tokens.other) as [
+							string,
+							any,
+						][]) {
+							if (count >= effectiveLimit) break;
+							if (!filterLower || name.toLowerCase().includes(filterLower)) {
+								other[name] = { type: token.type, value: token.value };
+								count++;
+							}
+						}
+						result.other = other;
 					}
 
 					return {

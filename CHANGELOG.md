@@ -5,6 +5,22 @@ All notable changes to Figma Console MCP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Design-system summary reads the file's tokens again. Server-only: **no plugin re-import needed**.
+
+### Fixed
+
+- **`figma_get_design_system_summary` reported 0 tokens on every file.** It read the variables from a `.data` field the Desktop Bridge never sends; `EXECUTE_CODE` nests them under `result` (#68). The summary and `figma_get_token_values` now read them the way `variable-resolver.ts` does.
+- **Aliased number variables came out as 0.** A spacing variable pointing at another variable now resolves to its value in the default mode.
+- **The spacing scale mixed in radius and typography numbers** (it started at a letter spacing of -4.4). Only number variables scoped to gap or width/height, or left unscoped, count as spacing. The rest go to a new `other` group, typed by scope (`CORNER_RADIUS`, `FONT_SIZE`, `LETTER_SPACING`, …), as do string and boolean variables.
+- **Typography was always empty.** The summary now includes the file's local text styles.
+
+### Changed
+
+- `figma_get_token_values` takes `type: "typography"` and `type: "other"`; `"all"` includes both.
+- The summary's token total counts every variable and text style, and `tokens.other` reports a count per type.
+
 ## [1.40.9] - 2026-10-02
 
 Support for Figma's composed colors: a color variable set to another color at an opacity ("grey/900 at 50%"). Server-only: **no plugin re-import needed**.

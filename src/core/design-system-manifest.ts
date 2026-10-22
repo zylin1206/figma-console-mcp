@@ -424,8 +424,15 @@ export function getTokenSummary(manifest: DesignSystemManifest): {
 	spacing: { count: number; scale: number[] };
 	typography: { count: number; groups: string[] };
 	effects: { count: number };
+	other: { count: number; types: Record<string, number> };
 	collections: string[];
 } {
+	// Count the other variables by type (e.g. CORNER_RADIUS, FONT_SIZE, STRING)
+	const otherTypes: Record<string, number> = {};
+	for (const token of Object.values(manifest.tokens.other)) {
+		otherTypes[token.type] = (otherTypes[token.type] || 0) + 1;
+	}
+
 	// Group colors by prefix (e.g., "primary/500" -> "primary")
 	const colorGroups = new Set<string>();
 	for (const name of Object.keys(manifest.tokens.colors)) {
@@ -461,6 +468,10 @@ export function getTokenSummary(manifest: DesignSystemManifest): {
 		},
 		effects: {
 			count: Object.keys(manifest.tokens.effects).length,
+		},
+		other: {
+			count: Object.keys(manifest.tokens.other).length,
+			types: otherTypes,
 		},
 		collections: manifest.collections.map(c => c.name),
 	};
@@ -517,6 +528,181 @@ export function makeFigmaColorResolver(
 			return a < 1 ? `${hex}${Math.round(a * 255).toString(16).padStart(2, '0').toUpperCase()}` : hex;
 		}
 		return figmaColorToHex(resolved);
+	};
+}
+
+/**
+ * Build a resolver from a raw Figma variable value to the value it has in its
+ * collection's default mode, following aliases. Without it an aliased FLOAT
+ * (e.g. a component size pointing at a global dimension) came out as 0.
+ */
+export function makeFigmaValueResolver(
+	variables: Array<{ id: string; variableCollectionId?: string; valuesByMode?: Record<string, any> }>,
+	collections: Array<{ id: string; defaultModeId?: string }>,
+): (value: any) => any {
+	const byId = new Map(variables.map((v) => [v.id, v]));
+	const defaultMode = new Map(collections.map((c) => [c.id, c.defaultModeId]));
+	const resolve = (value: any, depth: number): any => {
+		if (depth > 20 || value === undefined || value === null) return undefined;
+		if (typeof value !== 'object' || value.type !== 'VARIABLE_ALIAS') return value;
+		const v = byId.get(value.id);
+		if (!v?.valuesByMode) return undefined;
+		const mode = (v.variableCollectionId && defaultMode.get(v.variableCollectionId)) || Object.keys(v.valuesByMode)[0];
+		return resolve(v.valuesByMode[mode], depth + 1);
+	};
+	return (value: any) => resolve(value, 0);
+}
+
+/**
+ * Unwrap connector.getVariables(). EXECUTE_CODE nests the script's return
+ * value under `result`; the plugin-UI cache path does not. Reading `.data`
+ * instead matched neither, so the design-system summary reported 0 tokens on
+ * every file. See #68. Returns null when no variables came back.
+ */
+export function unwrapBridgeVariables(raw: any): { variables: any[]; variableCollections: any[] } | null {
+	const data = raw?.result?.variables ? raw.result : raw;
+	if (!data?.success || !Array.isArray(data.variables)) return null;
+	return { variables: data.variables, variableCollections: data.variableCollections || [] };
+}
+
+/**
+ * FLOAT scopes that make a variable a spacing/dimension token. A FLOAT scoped
+ * only to something else — corner radius, font size, line height, letter
+ * spacing, stroke, opacity — is not spacing; filing those there made the
+ * spacing scale start at -4.4 (a letter spacing). A variable with no scopes
+ * or ALL_SCOPES stays spacing, as before, because nothing says otherwise.
+ */
+const SPACING_SCOPES = new Set(['GAP', 'WIDTH_HEIGHT', 'ALL_SCOPES']);
+
+export function isSpacingScope(scopes?: string[]): boolean {
+	return !scopes || scopes.length === 0 || scopes.some((s) => SPACING_SCOPES.has(s));
+}
+
+/**
+ * Add the Desktop Bridge variables to the manifest: collections, then each
+ * variable by type. COLOR → colors, spacing-scoped FLOAT → spacing, every
+ * other variable → other (typed by its first scope, or its resolved type).
+ * Returns false when the result held no variables.
+ */
+export function addVariablesToManifest(manifest: DesignSystemManifest, raw: any): boolean {
+	const data = unwrapBridgeVariables(raw);
+	if (!data) return false;
+
+	for (const collection of data.variableCollections) {
+		manifest.collections.push({
+			id: collection.id,
+			name: collection.name,
+			modes: (collection.modes || []).map((m: any) => ({ modeId: m.modeId, name: m.name })),
+			defaultModeId: collection.defaultModeId,
+		});
+	}
+
+	const colorHex = makeFigmaColorResolver(data.variables, manifest.collections);
+	const resolveValue = makeFigmaValueResolver(data.variables, manifest.collections);
+	for (const variable of data.variables) {
+		const name = variable.name;
+		const defaultModeId = manifest.collections.find((c) => c.id === variable.variableCollectionId)?.defaultModeId;
+		const defaultValue = defaultModeId ? variable.valuesByMode?.[defaultModeId] : undefined;
+
+		if (variable.resolvedType === 'COLOR') {
+			manifest.tokens.colors[name] = {
+				name,
+				value: colorHex(defaultValue),
+				variableId: variable.id,
+				scopes: variable.scopes,
+			};
+		} else if (variable.resolvedType === 'FLOAT' && isSpacingScope(variable.scopes)) {
+			const value = resolveValue(defaultValue);
+			manifest.tokens.spacing[name] = {
+				name,
+				value: typeof value === 'number' ? value : 0,
+				variableId: variable.id,
+			};
+		} else {
+			manifest.tokens.other[name] = {
+				name,
+				type: (variable.resolvedType === 'FLOAT' && variable.scopes?.[0]) || variable.resolvedType,
+				value: resolveValue(defaultValue),
+				variableId: variable.id,
+			};
+		}
+	}
+	return true;
+}
+
+/**
+ * Numeric weight for a font style name ("Semi Bold" → 600). Longer names are
+ * tested first so "Extra Light" is not read as "Light", nor "Semi Bold" as
+ * "Bold".
+ */
+const FONT_WEIGHTS: Array<[RegExp, number]> = [
+	[/thin|hairline/i, 100],
+	[/(extra|ultra)[\s-]?light/i, 200],
+	[/(semi|demi)[\s-]?bold/i, 600],
+	[/(extra|ultra)[\s-]?bold/i, 800],
+	[/black|heavy/i, 900],
+	[/light/i, 300],
+	[/medium/i, 500],
+	[/bold/i, 700],
+];
+
+export function fontWeightFromStyle(style?: string): number {
+	for (const [pattern, weight] of FONT_WEIGHTS) {
+		if (style && pattern.test(style)) return weight;
+	}
+	return 400;
+}
+
+/**
+ * Add the local text styles (connector.getTextStyles(), shaped
+ * { success, data: { styles } }) to the manifest's typography tokens. The
+ * summary used to leave typography empty even on files with text styles.
+ * Returns false when no styles came back.
+ */
+export function addTextStylesToManifest(manifest: DesignSystemManifest, raw: any): boolean {
+	const styles = raw?.success ? raw.data?.styles : undefined;
+	if (!Array.isArray(styles)) return false;
+
+	for (const style of styles) {
+		const lineHeight = style.lineHeight;
+		manifest.tokens.typography[style.name] = {
+			name: style.name,
+			fontFamily: style.fontFamily,
+			fontSize: style.fontSize,
+			fontWeight: fontWeightFromStyle(style.fontStyle),
+			lineHeight:
+				lineHeight && typeof lineHeight === 'object'
+					? { value: lineHeight.value ?? 0, unit: lineHeight.unit }
+					: lineHeight ?? 0,
+			letterSpacing: typeof style.letterSpacing === 'object' ? style.letterSpacing?.value : style.letterSpacing,
+			textCase: style.textCase,
+			textDecoration: style.textDecoration,
+			styleId: style.id,
+			description: style.description || undefined,
+		};
+	}
+	return true;
+}
+
+/**
+ * Recompute the manifest summary from its tokens and components. Every
+ * variable and text style counts as a token.
+ */
+export function summarizeManifest(manifest: DesignSystemManifest): void {
+	const { colors, spacing, typography, effects, other } = manifest.tokens;
+	manifest.summary = {
+		totalTokens:
+			Object.keys(colors).length +
+			Object.keys(spacing).length +
+			Object.keys(typography).length +
+			Object.keys(effects).length +
+			Object.keys(other).length,
+		totalComponents: Object.keys(manifest.components).length,
+		totalComponentSets: Object.keys(manifest.componentSets).length,
+		colorPalette: Object.keys(colors).slice(0, 10),
+		spacingScale: [...new Set(Object.values(spacing).map((s) => s.value))].sort((a, b) => a - b).slice(0, 10),
+		typographyScale: Object.keys(typography),
+		componentCategories: [],
 	};
 }
 

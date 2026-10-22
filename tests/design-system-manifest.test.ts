@@ -2,11 +2,18 @@
  * Design System Manifest Tests
  *
  * Unit tests for DesignSystemManifestCache, searchComponents, getCategories,
- * getTokenSummary, rgbToHex, figmaColorToHex, generateManifestSummary, createEmptyManifest.
+ * getTokenSummary, rgbToHex, figmaColorToHex, generateManifestSummary, createEmptyManifest,
+ * and the Desktop Bridge → manifest helpers (variables, text styles, summary).
  */
 
 import {
+	addTextStylesToManifest,
+	addVariablesToManifest,
 	componentSearchLoadFailure,
+	fontWeightFromStyle,
+	isSpacingScope,
+	summarizeManifest,
+	unwrapBridgeVariables,
 	DesignSystemManifestCache,
 	searchComponents,
 	getCategories,
@@ -457,5 +464,162 @@ describe("componentSearchLoadFailure", () => {
 			components: { k1: { key: "k1", nodeId: "1:1", name: "Button" } } as any,
 		});
 		expect(componentSearchLoadFailure(manifest, warning)).toBeNull();
+	});
+});
+
+// ============================================================================
+// Desktop Bridge → manifest
+// ============================================================================
+
+// The shape connector.getVariables() really returns: EXECUTE_CODE nests the
+// script's return value under `result` (see #68).
+function bridgeVariables(variables: any[], variableCollections: any[]) {
+	return { success: true, result: { success: true, variables, variableCollections } };
+}
+
+const collections = [
+	{ id: "c1", name: "Global", modes: [{ modeId: "m1", name: "Default" }], defaultModeId: "m1" },
+];
+
+const variables = [
+	{ id: "v1", name: "blue/500", resolvedType: "COLOR", variableCollectionId: "c1", scopes: ["ALL_FILLS"], valuesByMode: { m1: { r: 0, g: 0, b: 1, a: 1 } } },
+	{ id: "v2", name: "dm-4", resolvedType: "FLOAT", variableCollectionId: "c1", scopes: ["GAP", "WIDTH_HEIGHT"], valuesByMode: { m1: 16 } },
+	{ id: "v3", name: "Input/Gap", resolvedType: "FLOAT", variableCollectionId: "c1", scopes: ["GAP"], valuesByMode: { m1: { type: "VARIABLE_ALIAS", id: "v2" } } },
+	{ id: "v4", name: "Radius/Base", resolvedType: "FLOAT", variableCollectionId: "c1", scopes: ["CORNER_RADIUS"], valuesByMode: { m1: 8 } },
+	{ id: "v5", name: "Letter-Spacing/Display", resolvedType: "FLOAT", variableCollectionId: "c1", scopes: ["LETTER_SPACING"], valuesByMode: { m1: -4.4 } },
+	{ id: "v6", name: "Legacy/Size", resolvedType: "FLOAT", variableCollectionId: "c1", scopes: ["ALL_SCOPES"], valuesByMode: { m1: 24 } },
+	{ id: "v7", name: "Font/Family", resolvedType: "STRING", variableCollectionId: "c1", scopes: ["FONT_FAMILY"], valuesByMode: { m1: "Inter" } },
+];
+
+describe("unwrapBridgeVariables", () => {
+	it("unwraps the EXECUTE_CODE `result` nesting", () => {
+		const data = unwrapBridgeVariables(bridgeVariables(variables, collections));
+		expect(data?.variables).toHaveLength(7);
+		expect(data?.variableCollections).toHaveLength(1);
+	});
+
+	it("accepts the un-nested plugin-UI cache shape", () => {
+		const data = unwrapBridgeVariables({ success: true, variables, variableCollections: collections });
+		expect(data?.variables).toHaveLength(7);
+	});
+
+	it("returns null for a failed or empty result", () => {
+		expect(unwrapBridgeVariables({ success: false, error: "boom" })).toBeNull();
+		expect(unwrapBridgeVariables({ success: true, result: { success: false } })).toBeNull();
+		expect(unwrapBridgeVariables(undefined)).toBeNull();
+	});
+});
+
+describe("isSpacingScope", () => {
+	it("treats gap, width/height, all-scopes and unscoped as spacing", () => {
+		expect(isSpacingScope(["GAP"])).toBe(true);
+		expect(isSpacingScope(["WIDTH_HEIGHT"])).toBe(true);
+		expect(isSpacingScope(["ALL_SCOPES"])).toBe(true);
+		expect(isSpacingScope([])).toBe(true);
+		expect(isSpacingScope(undefined)).toBe(true);
+	});
+
+	it("does not treat radius or typography scopes as spacing", () => {
+		expect(isSpacingScope(["CORNER_RADIUS"])).toBe(false);
+		expect(isSpacingScope(["LETTER_SPACING"])).toBe(false);
+		expect(isSpacingScope(["FONT_SIZE", "LINE_HEIGHT"])).toBe(false);
+	});
+});
+
+describe("addVariablesToManifest", () => {
+	it("reads variables from the real getVariables() shape (regression: summary reported 0 tokens)", () => {
+		const manifest = createEmptyManifest("key");
+		expect(addVariablesToManifest(manifest, bridgeVariables(variables, collections))).toBe(true);
+		summarizeManifest(manifest);
+		expect(manifest.summary.totalTokens).toBe(7);
+		expect(manifest.collections.map((c) => c.name)).toEqual(["Global"]);
+	});
+
+	it("files each variable by type and scope", () => {
+		const manifest = createEmptyManifest("key");
+		addVariablesToManifest(manifest, bridgeVariables(variables, collections));
+		expect(Object.keys(manifest.tokens.colors)).toEqual(["blue/500"]);
+		expect(Object.keys(manifest.tokens.spacing).sort()).toEqual(["Input/Gap", "Legacy/Size", "dm-4"]);
+		expect(manifest.tokens.other["Radius/Base"]).toMatchObject({ type: "CORNER_RADIUS", value: 8 });
+		expect(manifest.tokens.other["Letter-Spacing/Display"]).toMatchObject({ type: "LETTER_SPACING", value: -4.4 });
+		expect(manifest.tokens.other["Font/Family"]).toMatchObject({ type: "STRING", value: "Inter" });
+	});
+
+	it("resolves an aliased spacing value instead of reading it as 0", () => {
+		const manifest = createEmptyManifest("key");
+		addVariablesToManifest(manifest, bridgeVariables(variables, collections));
+		expect(manifest.tokens.spacing["Input/Gap"].value).toBe(16);
+	});
+
+	it("keeps letter spacing out of the spacing scale", () => {
+		const manifest = createEmptyManifest("key");
+		addVariablesToManifest(manifest, bridgeVariables(variables, collections));
+		summarizeManifest(manifest);
+		expect(manifest.summary.spacingScale).toEqual([16, 24]);
+		expect(getTokenSummary(manifest).other.types).toEqual({ CORNER_RADIUS: 1, LETTER_SPACING: 1, STRING: 1 });
+	});
+
+	it("returns false and adds nothing when no variables came back", () => {
+		const manifest = createEmptyManifest("key");
+		expect(addVariablesToManifest(manifest, { success: false, error: "timeout" })).toBe(false);
+		expect(manifest.collections).toHaveLength(0);
+	});
+});
+
+describe("fontWeightFromStyle", () => {
+	it("maps style names to weights", () => {
+		expect(fontWeightFromStyle("Regular")).toBe(400);
+		expect(fontWeightFromStyle("Light")).toBe(300);
+		expect(fontWeightFromStyle("Extra Light")).toBe(200);
+		expect(fontWeightFromStyle("Medium")).toBe(500);
+		expect(fontWeightFromStyle("Semi Bold")).toBe(600);
+		expect(fontWeightFromStyle("SemiBold Italic")).toBe(600);
+		expect(fontWeightFromStyle("Bold")).toBe(700);
+		expect(fontWeightFromStyle("ExtraBold")).toBe(800);
+		expect(fontWeightFromStyle("Black")).toBe(900);
+		expect(fontWeightFromStyle(undefined)).toBe(400);
+	});
+});
+
+describe("addTextStylesToManifest", () => {
+	// The shape connector.getTextStyles() returns (GET_TEXT_STYLES_RESULT).
+	const textStyles = {
+		success: true,
+		data: {
+			count: 2,
+			styles: [
+				{ id: "S:1", name: "Display/1", description: "", fontSize: 48, fontFamily: "Inter", fontStyle: "Semi Bold", letterSpacing: { value: -2, unit: "PIXELS" }, lineHeight: { value: 56, unit: "PIXELS" }, textCase: "ORIGINAL", textDecoration: "NONE" },
+				{ id: "S:2", name: "Body/Base", description: "Body text", fontSize: 14, fontFamily: "Inter", fontStyle: "Regular", letterSpacing: { value: 0, unit: "PIXELS" }, lineHeight: { unit: "AUTO" }, textCase: "ORIGINAL", textDecoration: "NONE" },
+			],
+		},
+	};
+
+	it("adds each text style as a typography token", () => {
+		const manifest = createEmptyManifest("key");
+		expect(addTextStylesToManifest(manifest, textStyles)).toBe(true);
+		expect(manifest.tokens.typography["Display/1"]).toMatchObject({
+			fontFamily: "Inter",
+			fontSize: 48,
+			fontWeight: 600,
+			lineHeight: { value: 56, unit: "PIXELS" },
+			letterSpacing: -2,
+			styleId: "S:1",
+		});
+		expect(manifest.tokens.typography["Body/Base"].lineHeight).toEqual({ value: 0, unit: "AUTO" });
+	});
+
+	it("counts text styles in the summary (regression: typography reported 0)", () => {
+		const manifest = createEmptyManifest("key");
+		addTextStylesToManifest(manifest, textStyles);
+		summarizeManifest(manifest);
+		expect(manifest.summary.totalTokens).toBe(2);
+		expect(manifest.summary.typographyScale).toEqual(["Display/1", "Body/Base"]);
+		expect(getTokenSummary(manifest).typography).toEqual({ count: 2, groups: ["Display", "Body"] });
+	});
+
+	it("returns false for a failed result", () => {
+		const manifest = createEmptyManifest("key");
+		expect(addTextStylesToManifest(manifest, { success: false, error: "not a design file" })).toBe(false);
+		expect(Object.keys(manifest.tokens.typography)).toHaveLength(0);
 	});
 });
