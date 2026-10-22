@@ -7029,7 +7029,10 @@ figma.ui.onmessage = async (msg) => {
           letterSpacing: style.letterSpacing,
           lineHeight: style.lineHeight,
           textCase: style.textCase,
-          textDecoration: style.textDecoration
+          textDecoration: style.textDecoration,
+          // Variable fonts (Update 138) and paragraph wrapping (Update 134)
+          variationSettings: style.fontName && style.fontName.variationSettings ? style.fontName.variationSettings : undefined,
+          textWrapStyle: style.textWrapStyle && style.textWrapStyle !== 'AUTO' ? style.textWrapStyle : undefined
         });
       }
       console.log('🌉 [Desktop Bridge] Got ' + styles.length + ' text styles');

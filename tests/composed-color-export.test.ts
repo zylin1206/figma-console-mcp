@@ -174,6 +174,19 @@ describe("composed colors: review findings", () => {
 		expect(fmt(p, { format: "css-vars" }).files[0].content).toMatch(/--transparency-medium: 50;/);
 	});
 
+	it("a COLOR_OPACITY-scoped variable is unitless even when no composed color uses it", () => {
+		const p = two();
+		p.variables.push(
+			{ id: "f", name: "fade", resolvedType: "FLOAT", variableCollectionId: "P", scopes: ["COLOR_OPACITY"], valuesByMode: { "9:0": 40 } },
+			{ id: "m", name: "mist", resolvedType: "FLOAT", variableCollectionId: "P", scopes: ["OPACITY", "COLOR_OPACITY"], valuesByMode: { "9:0": 10 } },
+			{ id: "g8", name: "gap-8", resolvedType: "FLOAT", variableCollectionId: "P", scopes: ["GAP", "COLOR_OPACITY"], valuesByMode: { "9:0": 8 } },
+		);
+		const css = fmt(p, { format: "css-vars" }).files[0].content;
+		expect(css).toMatch(/--fade: 40;/);
+		expect(css).toMatch(/--mist: 10;/);
+		expect(css).toMatch(/--gap-8: 8px;/);
+	});
+
 	it("a primitive outside the export falls back to the resolved color", () => {
 		const doc = convertFigmaVariablesToDocument(composedPayload, { exportedAt: "x", collectionIds: ["S"] } as any).document;
 		const r: any = format(doc, { target: { format: "css-vars" } } as any);

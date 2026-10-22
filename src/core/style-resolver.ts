@@ -103,6 +103,8 @@ export const LOCAL_STYLES_CODE = `
         paragraphSpacing: t.paragraphSpacing,
         textCase: t.textCase,
         textDecoration: t.textDecoration,
+        variationSettings: t.fontName && t.fontName.variationSettings ? t.fontName.variationSettings : undefined,
+        textWrapStyle: t.textWrapStyle && t.textWrapStyle !== 'AUTO' ? t.textWrapStyle : undefined,
         boundVariables: bound(t.boundVariables)
       } };
       styles.push(tt);

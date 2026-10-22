@@ -637,6 +637,23 @@ describe("addStylesToManifest", () => {
 		expect(summary.grids).toEqual({ count: 1, names: ["12 col"] });
 	});
 
+	it("keeps variable-font axes and text wrapping; wght overrides the style-name weight", () => {
+		const manifest = createEmptyManifest("key");
+		addStylesToManifest(manifest, [
+			{ id: "S:7", name: "Heading/Fluid", style_type: "TEXT", value: { typography: { fontFamily: "Inter Variable", fontStyle: "Regular", fontSize: 32, variationSettings: { wght: 550, opsz: 32 }, textWrapStyle: "BALANCE" } } },
+		]);
+		expect(manifest.tokens.typography["Heading/Fluid"]).toMatchObject({
+			fontWeight: 550,
+			variationSettings: { wght: 550, opsz: 32 },
+			textWrapStyle: "BALANCE",
+		});
+		// Static fonts keep the name-derived weight and carry neither field
+		addStylesToManifest(manifest, styles);
+		expect(manifest.tokens.typography["Display/1"].fontWeight).toBe(600);
+		expect(manifest.tokens.typography["Display/1"].variationSettings).toBeUndefined();
+		expect(manifest.tokens.typography["Display/1"].textWrapStyle).toBeUndefined();
+	});
+
 	it("tolerates a style without a value (REST-shaped)", () => {
 		const manifest = createEmptyManifest("key");
 		addStylesToManifest(manifest, [{ name: "Brand/Primary", style_type: "FILL" }]);

@@ -33,6 +33,10 @@ export interface TypographyToken {
 	letterSpacing?: number;
 	textCase?: 'ORIGINAL' | 'UPPER' | 'LOWER' | 'TITLE';
 	textDecoration?: 'NONE' | 'UNDERLINE' | 'STRIKETHROUGH';
+	/** Variable fonts only: OpenType axis values keyed by tag, e.g. { wght: 550, wdth: 90 }. */
+	variationSettings?: Record<string, number>;
+	/** Paragraph wrapping; absent means Figma's default ('AUTO'). */
+	textWrapStyle?: 'BALANCE' | 'PRETTY';
 	styleId?: string;
 	description?: string;
 }
@@ -708,7 +712,12 @@ export function addStylesToManifest(
 				...base,
 				fontFamily: t.fontFamily,
 				fontSize: t.fontSize,
-				fontWeight: fontWeightFromStyle(t.fontStyle),
+				// A variable font's wght axis is the real weight; the style name
+				// ("Regular") only names the instance the axes started from.
+				fontWeight:
+					typeof t.variationSettings?.wght === 'number'
+						? t.variationSettings.wght
+						: fontWeightFromStyle(t.fontStyle),
 				lineHeight:
 					t.lineHeight && typeof t.lineHeight === 'object'
 						? { value: t.lineHeight.value ?? 0, unit: t.lineHeight.unit }
@@ -716,6 +725,8 @@ export function addStylesToManifest(
 				letterSpacing: typeof t.letterSpacing === 'object' ? t.letterSpacing?.value : t.letterSpacing,
 				textCase: t.textCase,
 				textDecoration: t.textDecoration,
+				variationSettings: t.variationSettings,
+				textWrapStyle: t.textWrapStyle,
 			};
 		} else if (style.style_type === 'FILL') {
 			manifest.tokens.paintStyles[style.name] = { ...base, paints: value.fills || [] };

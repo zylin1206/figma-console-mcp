@@ -5,6 +5,36 @@ import { createChildLogger } from "./logger.js";
 const logger = createChildLogger({ component: "write-tools" });
 
 /**
+ * Variable types the Plugin API can create. TIMING (seconds) and EASING
+ * (a MotionEasing object) became writable in Plugin API Update 133.
+ */
+const VARIABLE_TYPE = z.enum(["COLOR", "FLOAT", "STRING", "BOOLEAN", "TIMING", "EASING"]);
+
+/** A Figma MotionEasing value, the value of an EASING variable. */
+const EASING_VALUE = z.object({
+	type: z.enum([
+		"EASE_IN", "EASE_OUT", "EASE_IN_AND_OUT", "LINEAR",
+		"EASE_IN_BACK", "EASE_OUT_BACK", "EASE_IN_AND_OUT_BACK",
+		"GENTLE", "QUICK", "BOUNCY", "SLOW", "HOLD",
+		"CUSTOM_CUBIC_BEZIER", "CUSTOM_SPRING",
+	]),
+	easingFunctionCubicBezier: z
+		.object({ x1: z.number(), y1: z.number(), x2: z.number(), y2: z.number() })
+		.optional()
+		.describe("Required for CUSTOM_CUBIC_BEZIER"),
+	easingFunctionSpring: z
+		.object({ bounce: z.number().min(0).max(1) })
+		.optional()
+		.describe("Required for CUSTOM_SPRING: normalized bounce 0–1"),
+});
+
+/** Any value a variable can be set to through these tools. */
+const VARIABLE_VALUE = z.union([z.string(), z.number(), z.boolean(), EASING_VALUE]);
+
+const VALUE_FORMATS =
+	"COLOR: hex '#FF0000'. FLOAT: number. STRING: text. BOOLEAN: true/false. TIMING: seconds (0.3). EASING: { type: 'EASE_OUT' } | { type: 'CUSTOM_CUBIC_BEZIER', easingFunctionCubicBezier: { x1, y1, x2, y2 } } | { type: 'CUSTOM_SPRING', easingFunctionSpring: { bounce } }.";
+
+/**
  * Register write/manipulation tools that require a Desktop Bridge connector.
  * Used by both local mode (src/local.ts) and cloud mode (src/index.ts).
  */
@@ -116,7 +146,7 @@ Layers: If your code creates helper frames, placeholder nodes, or intermediate l
 	// Tool: Update a variable's value
 	server.tool(
 		"figma_update_variable",
-		"Update a single variable's value and/or its description. Pass modeId+value to change the value in a mode; pass description to set the 'How to use this variable' text shown in the Variables panel (and exported as DTCG $description). At least one of {modeId+value} or {description} is required. For many value updates at once, use figma_batch_update_variables (10-50x faster). Use figma_get_variables first for IDs. COLOR: hex '#FF0000', FLOAT: number, STRING: text, BOOLEAN: true/false. Requires Desktop Bridge plugin.",
+		`Update a single variable's value and/or its description. Pass modeId+value to change the value in a mode; pass description to set the 'How to use this variable' text shown in the Variables panel (and exported as DTCG $description). At least one of {modeId+value} or {description} is required. For many value updates at once, use figma_batch_update_variables (10-50x faster). Use figma_get_variables first for IDs. ${VALUE_FORMATS} Requires Desktop Bridge plugin.`,
 		{
 			variableId: z
 				.string()
@@ -129,12 +159,9 @@ Layers: If your code creates helper frames, placeholder nodes, or intermediate l
 				.describe(
 					"The mode ID to update the value in (e.g., '1:0'). Required when updating a value. Get this from the variable's collection modes.",
 				),
-			value: z
-				.union([z.string(), z.number(), z.boolean()])
+			value: VARIABLE_VALUE
 				.optional()
-				.describe(
-					"The new value (requires modeId). For COLOR: hex string like '#FF0000'. For FLOAT: number. For STRING: text. For BOOLEAN: true/false.",
-				),
+				.describe(`The new value (requires modeId). ${VALUE_FORMATS}`),
 			description: z
 				.string()
 				.optional()
@@ -222,7 +249,7 @@ Layers: If your code creates helper frames, placeholder nodes, or intermediate l
 	// Tool: Create a new variable
 	server.tool(
 		"figma_create_variable",
-		"Create a single Figma variable. For multiple variables, use figma_batch_create_variables instead (10-50x faster). Use figma_get_variables first to get collection IDs. Supports COLOR, FLOAT, STRING, BOOLEAN. Requires Desktop Bridge plugin.",
+		"Create a single Figma variable. For multiple variables, use figma_batch_create_variables instead (10-50x faster). Use figma_get_variables first to get collection IDs. Supports COLOR, FLOAT, STRING, BOOLEAN, TIMING, EASING. Requires Desktop Bridge plugin.",
 		{
 			name: z
 				.string()
@@ -232,18 +259,18 @@ Layers: If your code creates helper frames, placeholder nodes, or intermediate l
 				.describe(
 					"The collection ID to create the variable in (e.g., 'VariableCollectionId:123:456'). Get this from figma_get_variables.",
 				),
-			resolvedType: z
-				.enum(["COLOR", "FLOAT", "STRING", "BOOLEAN"])
-				.describe("The variable type: COLOR, FLOAT, STRING, or BOOLEAN"),
+			resolvedType: VARIABLE_TYPE.describe(
+				"The variable type: COLOR, FLOAT, STRING, BOOLEAN, TIMING (motion duration) or EASING (motion curve)",
+			),
 			description: z
 				.string()
 				.optional()
 				.describe("Optional description for the variable"),
 			valuesByMode: z
-				.record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
+				.record(z.string(), VARIABLE_VALUE)
 				.optional()
 				.describe(
-					"Optional initial values by mode ID. Example: { '1:0': '#FF0000', '1:1': '#0000FF' }",
+					`Optional initial values by mode ID. Example: { '1:0': '#FF0000', '1:1': '#0000FF' }. ${VALUE_FORMATS}`,
 				),
 		},
 		async ({
@@ -685,21 +712,16 @@ Layers: If your code creates helper frames, placeholder nodes, or intermediate l
 				.array(
 					z.object({
 						name: z.string().describe("Variable name (e.g., 'primary-blue')"),
-						resolvedType: z
-							.enum(["COLOR", "FLOAT", "STRING", "BOOLEAN"])
-							.describe("Variable type"),
+						resolvedType: VARIABLE_TYPE.describe("Variable type"),
 						description: z
 							.string()
 							.optional()
 							.describe("Optional description"),
 						valuesByMode: z
-							.record(
-								z.string(),
-								z.union([z.string(), z.number(), z.boolean()]),
-							)
+							.record(z.string(), VARIABLE_VALUE)
 							.optional()
 							.describe(
-								"Values by mode ID. For COLOR: hex like '#FF0000'. Example: { '1:0': '#FF0000' }",
+								`Values by mode ID. Example: { '1:0': '#FF0000' }. ${VALUE_FORMATS}`,
 							),
 					}),
 				)
@@ -832,11 +854,7 @@ return {
 						modeId: z
 							.string()
 							.describe("Mode ID (e.g., '1:0')"),
-						value: z
-							.union([z.string(), z.number(), z.boolean()])
-							.describe(
-								"New value. COLOR: hex like '#FF0000'. FLOAT: number. STRING: text. BOOLEAN: true/false.",
-							),
+						value: VARIABLE_VALUE.describe(`New value. ${VALUE_FORMATS}`),
 					}),
 				)
 				.min(1)

@@ -259,10 +259,11 @@ function convertVariable(
   // slashes to indicate grouping: "color/brand/primary" → ["color", "brand", "primary"].
   const { path, strippedTypeSuffix } = variableTokenPath(variable, opts);
 
-  // Map resolvedType to TokenType.
+  // Map resolvedType to TokenType. OPACITY (layer opacity) and COLOR_OPACITY
+  // (color opacity pickers, Update 139) both hold a unitless 0–1 number.
   const isOpacity =
     variable.resolvedType === "FLOAT" &&
-    ((variable.scopes?.length === 1 && variable.scopes[0] === "OPACITY") ||
+    ((!!variable.scopes?.length && variable.scopes.every((s) => OPACITY_SCOPES.has(s))) ||
       !!opacityVarRegistry.get(variableById)?.has(variable.id));
   const type = isOpacity ? "number" : mapResolvedType(variable.resolvedType, variable.name, warnings);
 
@@ -568,6 +569,8 @@ function convertValue(
 const defaultModeRegistry = new WeakMap<Map<string, FigmaVariable>, Map<string, string>>();
 /** collectionId → (modeId → mode name), per conversion run. */
 const modeNameRegistry = new WeakMap<Map<string, FigmaVariable>, Map<string, Map<string, string>>>();
+/** FLOAT scopes that make a variable a unitless 0–1 opacity, not a dimension. */
+const OPACITY_SCOPES = new Set(["OPACITY", "COLOR_OPACITY"]);
 /** Ids of FLOAT variables some composed color uses as its opacity. */
 const opacityVarRegistry = new WeakMap<Map<string, FigmaVariable>, Set<string>>();
 
